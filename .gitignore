@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.venv/
+work/
+*.osv
+*.OSV
+*.ply
+*.sog
+*.glb
+.DS_Store
