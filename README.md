@@ -9,7 +9,7 @@ DJI Osmo 360のオリジナルOSVから静的な3D Gaussian Splattingを生成�
 - Python 3.10以上。Python側の外部パッケージは不要。
 - FFmpegの`ffprobe`。
 - [Spirula Studio v2026.9.20](https://github.com/harry7557558/spirula-studio/releases/tag/v2026.9.20)。実行ファイルは別途配置。
-- Spirulaが動作するGPU・ドライバ。ネイティブ動画抽出には対応する動画デコード機能も必要。Macを含め実機での動作保証はまだありません。
+- Spirulaが動作するGPU・ドライバ。ネイティブ動画抽出にはVulkan Video対応が必要。M3 Max実機ではGPU認識と別途行った5位置のSfM診断は成功しましたが、ネイティブ動画抽出は非対応でした。Macでは`--decoder ffmpeg`を使用します。学習の実機検証は未完了です。
 - オリジナルの短いOSV（まず1〜3分）。初期版は同一解像度・同一フレームレート・同一開始時刻の2映像トラックに限定。
 - マスクを使う場合は、対応するSAMモデルを事前配置。
 
@@ -27,6 +27,18 @@ python3 -m fs_capture plan work/room-01 extract
 python3 -m fs_capture run work/room-01 extract
 python3 -m fs_capture status work/room-01
 ```
+
+Macなど、Vulkan Videoを利用できない環境では、初期化時に`--decoder ffmpeg`を追加してください。FFmpegで両魚眼トラックの同じフレーム番号を抽出します。スティッチ・ピンホール変換・回転は行いません。位置推定と学習は引き続きSpirulaを使います。`--ffmpeg /path/to/ffmpeg`も指定できます。
+
+```sh
+python3 -m fs_capture init /path/to/clip.OSV work/room-mac \
+  --spirula /path/to/spirula --decoder ffmpeg --fps 3
+python3 -m fs_capture run work/room-mac extract
+```
+
+2026-09-24のM3 Max実素材試験では、3840×3840・25fps・10.28秒の2トラックOSVから33時刻・66枚の画像を抽出できました。これはデコード・抽出の成功であり、3D復元の成功ではありません。人物を含む素材やほぼ固定撮影の素材は、マスクと撮影位置の検証が別途必要です。
+
+同日、同一空間に見える5本から各1時刻・両魚眼を取り出した別診断では、10枚すべてが1モデルへ登録されました。単一動画CLIとは別の試行です。詳しくは[実素材検証の結果](docs/real-capture-check.md)を参照してください。
 
 `--fps`は目標値です。元動画fpsから整数間隔を計算するため、例えば29.97fpsを10フレームごとに抽出すると2.997fpsになります。現在は一定間隔・同期抽出です。ブレと重複を選別する適応抽出は後続課題です。
 

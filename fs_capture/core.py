@@ -80,12 +80,15 @@ def probe(path, ffprobe):
     return metadata, rates[0]
 
 
-def create(source, job, fps=3, iterations=30000, spirula="spirula", ffprobe="ffprobe", mask_model=None):
+def create(source, job, fps=3, iterations=30000, spirula="spirula", ffprobe="ffprobe", mask_model=None,
+           decoder="spirula", ffmpeg="ffmpeg"):
     source, job = Path(source).resolve(), Path(job).resolve()
     if source.suffix.lower() != ".osv" or not source.is_file() or source.stat().st_size == 0:
         raise CaptureError("空でないオリジナルOSVファイルを指定してください。")
     if not math.isfinite(fps) or fps <= 0 or iterations < 1:
         raise CaptureError("fpsとiterationsは正の値が必要です。")
+    if decoder not in ("spirula", "ffmpeg"):
+        raise CaptureError("decoderはspirulaまたはffmpegを指定してください。")
     metadata, source_fps = probe(source, tool(ffprobe))
     if fps > source_fps:
         raise CaptureError("抽出fpsが元動画のfpsを超えています。")
@@ -97,6 +100,7 @@ def create(source, job, fps=3, iterations=30000, spirula="spirula", ffprobe="ffp
               "settings": {"requestedFps": fps, "sourceFps": source_fps,
                            "skip": max(1, round(source_fps / fps)), "iterations": iterations,
                            "spirula": spirula, "spirulaVersion": SPIRULA_VERSION,
+                           "decoder": decoder, "ffmpeg": ffmpeg,
                            "maskModel": str(model) if model else None,
                            "maskModelSha256": digest(model) if model else None}}
     job.mkdir(parents=True, exist_ok=False)
@@ -140,6 +144,14 @@ def commands(config, state, stage, output):
     s = config["settings"]
     executable = s["spirula"]
     if stage == "extract":
+        if s.get("decoder", "spirula") == "ffmpeg":
+            argv = [s["ffmpeg"], "-nostdin", "-hide_banner", "-loglevel", "warning", "-n",
+                    "-noautorotate", "-i", config["source"]["path"]]
+            for i in range(2):
+                argv += ["-map", f"0:V:{i}", "-vf", f"select=not(mod(n\\,{s['skip']}))",
+                         "-fps_mode", "passthrough", "-q:v", "2", "-start_number", "0",
+                         str(output / "images" / f"cam{i}" / "decoded_%08d.jpg")]
+            return [argv]
         return [[executable, "sam", "extract", config["source"]["path"],
                  "--out", str(output / "images"), "--skip", str(s["skip"]),
                  "--keep", "1", "--360", "off", "--sync", "--no-autorotate"]]
@@ -202,6 +214,13 @@ def check_ply(path):
 
 def validate(stage, folder, config, state=None):
     if stage == "extract":
+        if config["settings"].get("decoder") == "ffmpeg":
+            for cam in ("cam0", "cam1"):
+                paths = sorted((folder / "images" / cam).glob("decoded_*.jpg"))
+                for i, p in enumerate(paths):
+                    if p.stem != f"decoded_{i:08d}":
+                        raise CaptureError("FFmpeg抽出画像の連番が欠落しています。")
+                    p.rename(p.with_name(f"{i * config['settings']['skip']:05d}.jpg"))
         a = sorted((folder / "images/cam0").glob("*.jpg"))
         b = sorted((folder / "images/cam1").glob("*.jpg"))
         if len(a) < 3 or [p.name for p in a] != [p.name for p in b] or any(p.stat().st_size == 0 for p in a + b):
@@ -329,17 +348,22 @@ def run(job, stage):
             reviewed(state, "mask")
         if stage == "train":
             reviewed(state, "sfm")
-        executable = tool(s["spirula"])
-        version = capture([executable, "sfm", "--version"]).strip()
-        if SPIRULA_VERSION not in version:
+        is_ffmpeg = stage == "extract" and s.get("decoder") == "ffmpeg"
+        executable = tool(s["ffmpeg"] if is_ffmpeg else s["spirula"])
+        version = capture([executable, *(["-version"] if is_ffmpeg else ["sfm", "--version"])]).strip()
+        if not is_ffmpeg and SPIRULA_VERSION not in version:
             raise CaptureError(f"対応版はSpirula {SPIRULA_VERSION}です。検出: {version}")
         binary = {"path": executable, "sha256": digest(executable), "version": version}
-        if state.get("engine") and state["engine"] != binary:
+        engine_key = "decoder" if is_ffmpeg else "engine"
+        if state.get(engine_key) and state[engine_key] != binary:
             raise CaptureError("Spirula実行ファイルが変更されています。新規ジョブを作成してください。")
-        state["engine"] = binary
+        state[engine_key] = binary
         attempt = job / "attempts" / (stage + "-" + uuid.uuid4().hex[:12])
         output = attempt / "output"
         output.mkdir(parents=True)
+        if is_ffmpeg:
+            for cam in ("cam0", "cam1"):
+                (output / "images" / cam).mkdir(parents=True)
         argv_list = commands(config, state, stage, output)
         for argv in argv_list:
             argv[0] = executable

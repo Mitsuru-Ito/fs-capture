@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 import struct
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -165,6 +167,47 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaises(c.CaptureError):
             c.execute([sys.executable, "-c", "print('failure'); raise SystemExit(7)"], log)
         self.assertIn("failure", log.read_text())
+
+    def test_ffmpeg_command_keeps_two_video_tracks_and_source_frames(self):
+        config = c.read(self.job / "job.json")
+        config["settings"].update(decoder="ffmpeg", ffmpeg="ffmpeg", skip=8)
+        argv = c.commands(config, {}, "extract", self.root)[0]
+        self.assertIn("0:V:0", argv)
+        self.assertIn("0:V:1", argv)
+        self.assertIn("select=not(mod(n\\,8))", argv)
+        self.assertIn("-noautorotate", argv)
+        output = self.root / "ffmpeg-test"
+        for cam in ("cam0", "cam1"):
+            folder = output / "images" / cam
+            folder.mkdir(parents=True)
+            for i in range(3):
+                (folder / f"decoded_{i:08d}.jpg").write_bytes(b"test-only")
+        c.validate("extract", output, config)
+        index = c.read(output / "source-index.json")
+        self.assertEqual([f["frameIndex"] for f in index["frames"]], [0, 8, 16])
+        self.assertEqual(index["frames"][2]["approximateSeconds"], 16 / 30)
+
+    def test_ffmpeg_missing_sequence_fails(self):
+        config = c.read(self.job / "job.json")
+        config["settings"]["decoder"] = "ffmpeg"
+        folder = self.root / "missing/images/cam0"
+        folder.mkdir(parents=True)
+        (folder / "decoded_00000001.jpg").write_bytes(b"test-only")
+        with self.assertRaisesRegex(c.CaptureError, "連番"):
+            c.validate("extract", self.root / "missing", config)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg integration tools absent")
+    def test_real_ffmpeg_dual_track_extraction(self):
+        source = self.root / "synthetic.OSV"
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=10:duration=1.2",
+                        "-map", "0:v", "-map", "0:v", "-c:v", "mpeg4", "-f", "mp4", str(source)], check=True)
+        job = self.root / "ffmpeg-job"
+        c.create(source, job, fps=2.5, decoder="ffmpeg")
+        state = c.run(job, "extract")
+        self.assertEqual(state["stages"]["extract"]["validation"], {"timestamps": 3, "images": 6})
+        output = c.successful(state, "extract")
+        self.assertTrue((output / "images/cam1/00008.jpg").is_file())
+        self.assertEqual(c.read(output / "source-index.json")["frames"][-1]["approximateSeconds"], .8)
 
 
 if __name__ == "__main__":

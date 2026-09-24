@@ -23,6 +23,9 @@ def main(argv=None):
     init.add_argument("--spirula", default="spirula")
     init.add_argument("--ffprobe", default="ffprobe")
     init.add_argument("--mask-model", help="事前に取得したSAMモデルのパス")
+    init.add_argument("--decoder", choices=("spirula", "ffmpeg"), default="spirula",
+                      help="Mac等でVulkan動画デコードが使えない場合はffmpeg")
+    init.add_argument("--ffmpeg", default="ffmpeg")
     for action in ("plan", "run"):
         p = sub.add_parser(action, help="実行コマンドを表示" if action == "plan" else "1段階を実行")
         p.add_argument("job")
@@ -53,7 +56,8 @@ def main(argv=None):
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return 0 if okay else 1
         if args.action == "init":
-            result = create(args.source, args.job, args.fps, args.iterations, args.spirula, args.ffprobe, args.mask_model)
+            result = create(args.source, args.job, args.fps, args.iterations, args.spirula, args.ffprobe,
+                            args.mask_model, args.decoder, args.ffmpeg)
         elif args.action == "status":
             result = read(Path(args.job) / "state.json")
         elif args.action == "plan":
