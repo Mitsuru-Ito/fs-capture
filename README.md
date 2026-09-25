@@ -27,6 +27,16 @@ python3 -m fs_capture report work/room-02
 
 [manifest例](examples/fixed-captures.json)と[複数OSVの標準手順](docs/multi-capture.md)を参照してください。元動画・マスク・生成データは付属しません。既存の単一OSVコマンドは引き続き利用できます。
 
+## 生成モデルを標準画面で確認する
+
+```sh
+python3 -m fs_capture preview work/room-02 --viewer-assets /path/to/spirula-studio-source
+```
+
+最終PLYのGaussian描画、撮影カメラへの移動・見回し、投影を揃えた元画像・マスク確認、視点・判定・証拠の保存と復元に対応します。既存ランタイムを固定版・ハッシュ照合で再利用し、自動取得はしません。[起動・保存手順と対応条件](docs/preview.md)、[PR3Aの実モデル検証](docs/review-3a.md)を参照してください。
+
+新モデル199,952 Gaussianを撮影5位置と横移動2視点で確認しました。今回の周辺形状の理解用途では、手すりの二重化・床や梁の伸びが残り画質はFAILです。生成成功と納品可否は別で、衝突・納品・別PC試験はNOT_TESTEDです。
+
 ## 段階別の診断
 
 ```sh

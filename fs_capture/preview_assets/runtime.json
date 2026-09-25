@@ -1,0 +1,15 @@
+{
+  "commit": "cd93c75114f591419e394328ba76f33b721da73a",
+  "license": "GPL-3.0; external runtime, no repository license change",
+  "files": {
+    "viewer/js/renderer.js": "aef492840aee9e4d4068819c5c0efc6c70dfd555392e192874ced14fa4de3bbb",
+    "viewer/js/shaders.js": "7f4e7a209684e9f32c67e18339c9c53ec0285a8345fe82818219cf04a5de48c3",
+    "viewer/js/camera.js": "2efa18e264534181bb8c2d876b85d054e92db6bca592557dc8ba1a2f4b11baab",
+    "viewer/js/linalg.js": "dc61aeab199ed3439454794963ca6610ae43d27b157097dc68da20f91bde9234",
+    "viewer/js/colors.js": "022fdcdca22a4d59e775eca51055e2ca2195afc6a8a93373e9fbd21be774e87e",
+    "viewer/js/wasm.js": "15d311f664c88966ed8d1b6a2673f9b915fcc3609369d747b8e74410fe85cd81",
+    "viewer/js/ssv_wasm.js": "92d7556e1551dab99c153ab4e00fbd574be23b2f3b4fc7ba8129effe09c09ea2",
+    "viewer/js/ssv_wasm.wasm": "db1021017fe082b06ead5e1ebd7a4d07fcfd8d3776c097e62ec76aa7c6054d4c",
+    "LICENSE": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+  }
+}

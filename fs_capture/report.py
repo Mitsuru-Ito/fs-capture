@@ -1,4 +1,5 @@
 """Internal, standalone image report; never a delivery approval or public package."""
+import copy
 import base64
 import html
 import os
@@ -11,23 +12,38 @@ from . import core as c
 from .media import thumbnail
 
 
-def capture_check(job, label, status, note, reviewer):
+def capture_check(job, label, status, note, reviewer, references=None):
     root = Path(job).resolve()
     if not label.strip() or not note.strip() or not reviewer.strip() or status not in ('CAPTURED', 'NEEDS_CAPTURE', 'NOT_TESTED'):
         raise c.CaptureError('確認箇所・担当者・理由と有効な状態が必要です。')
     with c.locked(root):
+        state = c.read(root / 'state.json')
+        if c.digest(root / 'job.json') != state['configSha256']:
+            raise c.CaptureError('ジョブ設定が変更されています。')
+        artifacts = {}
+        for stage, record in state['stages'].items():
+            if record['status'] == 'succeeded':
+                checked_output(state, stage)
+                artifacts[stage] = copy.deepcopy(record['artifacts'])
+        references = references or []
+        for reference in references:
+            stage, separator, name = reference.partition(':')
+            if not separator or name not in artifacts.get(stage, {}):
+                raise c.CaptureError('確認対象の成果物が見つかりません: ' + reference)
         path = root / 'capture-qa.json'
         qa = c.read(path) if path.exists() else {'schemaVersion': 1, 'items': []}
         entry = next((x for x in qa['items'] if x['label'] == label), None)
         if entry is None:
             entry = {'id': uuid.uuid4().hex, 'label': label}
             qa['items'].append(entry)
-        entry.setdefault('history', []).append({k: entry[k] for k in ('status', 'note', 'reviewer', 'at') if k in entry})
+        if 'status' in entry:
+            previous = copy.deepcopy({k: v for k, v in entry.items() if k != 'history'})
+            entry.setdefault('history', []).append(previous)
         entry.update(status=status, note=note, reviewer=reviewer, at=time.time())
-        # Tie this human observation to the input config and currently available output snapshots.
-        state = c.read(root / 'state.json')
+        # Tie this human observation to the verified config and available output snapshots.
         entry['configSha256'] = state['configSha256']
-        entry['artifacts'] = {stage: record.get('artifacts', {}) for stage, record in state['stages'].items() if record['status'] == 'succeeded'}
+        entry['artifacts'] = artifacts
+        entry['references'] = {'targetId': entry['id'], 'scope': 'input configuration and available stage snapshots', 'stages': list(artifacts), 'files': list(references)}
         c.write(path, qa)
     return qa
 

@@ -1,0 +1,65 @@
+# 標準3Dプレビュー（PR3A）
+
+最終PLYを撮影カメラから表示し、元画像・マスクと照合して、検証視点と画質判断を保存する内部制作ツール。生成成功、指定視点の画質、移動範囲、公開情報、納品承認は別の判定である。
+
+## 起動
+
+```sh
+python3 -m fs_capture preview work/room-02 \
+  --viewer-assets /path/to/spirula-studio-source --port 8768
+```
+
+表示されたlocalhost URLを開く。`--viewer-assets`にはSpirulaの**ソースルート**を指定する。`viewer/`自体ではない。既存の単一schema 1・複数schema 2のジョブに対応し、成功時ハッシュを持つextract/mask/sfm/trainを要求する。extract/mask/sfmは従来のreview合格が必要。trainの画質reviewはプレビュー後に実施するため、起動の前提にしない。途中PLYは選ばない。
+
+参照版は[Spirula Studio cd93c75114f591419e394328ba76f33b721da73a](https://github.com/harry7557558/spirula-studio/tree/cd93c75114f591419e394328ba76f33b721da73a)。取得済みのソースを利用し、自動取得・ビルドはしない。`preview_assets/runtime.json`の全ファイルSHA-256を検査し、実際に必要な描画モジュール・WASM・LICENSEだけをローカル出力へコピーする。元ランタイムはGPLv3。本リポジトリのライセンスを新設・変更しておらず、この構成を顧客へ配布する権利確認は別工程。依存物をGitへ同梱しない。
+
+`--prepare-only`は専用フォルダを生成して終了する。既存プレビューの再起動は次で行う。
+
+```sh
+python3 -m fs_capture preview-serve work/room-02/previews/PREVIEW_ID --port 8768
+```
+
+## 確認と保存
+
+1. 撮影位置を選ぶ。左右・前後へ移動でき、15度ずつ見回せる。移動量は未校正のarbitrary units。衝突判定はない。
+2. 元画像とマスクの重ね表示を確認する。「開始位置へ戻る」は最初の撮影カメラへ戻る。
+3. 確認箇所、用途、担当者、判定、理由を入力し「視点・判定・証拠を保存」を押す。
+4. 表示された保存リンクからJSONを保存する。ダウンロードが制限される環境は「JSONをコピー」の内容をUTF-8ファイルに保存する。ブラウザの保存完了をアプリは推測しない。
+5. 次のコマンドで取り込み、画面を再読み込みする。「保存済み視点」から復元できる。
+
+```sh
+python3 -m fs_capture preview-import work/room-02/previews/PREVIEW_ID review.json
+```
+
+サーバは読み取り専用。確認結果の取り込みはCLIだけが行う。`reviews/`へUUID付きの記録とPNGを追記し、以前の判断を上書きしない。取り込みではモデル・描画コード・カメラ・投影を含むbundle識別、視点の有限値と直交軸、SH次数、PNGの構造・CRC・解凍結果・解像度を検査する。確認者の記述が正しいかを自動判定するものではない。機密画像を含むため確認JSON・PNGも内部データとして扱う。
+
+画質QAは指定用途・視点のPASS/FAIL/NOT_TESTED/UNKNOWNのみ。processは成果物検査の結果。navigation/privacy/deliveryはNOT_TESTEDのままで、この画面から合格に変更できない。適用不要の理由を扱う納品向け契約はPR4で追加する。画質FAILでも再確認用の保存・復元は可能。
+
+## 投影と座標
+
+- `cameras.bin`のモデル・幅・高さ・内部パラメータを読む。対応はSIMPLE_PINHOLE、PINHOLE、OPENCV_FISHEYE。それ以外は停止する。
+- COLMAPの`x_camera = R x_world + t`から中心`C = -R^T t`を計算する。表示カメラは右=Rの第1行、上=第2行の負、前=第3行。qvecはwxyz。既存SfMのcameras.jsonは変更しない。
+- 元画像を、指定した透視投影（既定90度・768×768）へ逆写像する。90度は確認用に選んだ画角であり、元の魚眼画角の推定値ではない。OPENCV_FISHEYEは固定版の`src/sfm/core/Camera.h`のKannala–Brandt式、`src/data/parsers/ColmapParser.cpp`のパラメータ順を確認した。
+- 元画像は双線形補間、マスクは最近傍。COLMAPの画素中心と表示の半画素位置を対応させる。マスクは白保持・黒除外。
+- 位置・向き（ロールを含む）が元カメラと一致するときだけ、同じ投影で比較したと表示する。横移動・見回し後の元画像は参考画像であり、その視点の正解画像ではない。
+- 学習画像の魚眼方式を変更しない。表示側はSpirulaの既存WebGL2 3DGS描画を使用する。3DGUTへ自動切替しない。SHを無断で減らさない。
+- 属性は上流ビューアのfloat16、SHはsnorm8への内部パッキングを使用する。量子化なしの学習レンダラとの完全一致を主張しない。
+- 初版は`scene_transform.json`で恒等変換を確認できる3dgsモデルに限定。非恒等変換、カメラ最適化、入力ワープ、明示的な色変換は未対応として停止する。未確認の座標変換を推測しない。
+
+## 配信の境界
+
+専用プレビューには最終PLY、表示用サイドカー、対応画像・マスク、描画ランタイムを独立コピーする。元ジョブ・成功時成果物を編集しない。配信は127.0.0.1のみ。ファイル一覧の許可リスト、Host/Origin、SHA-256、シンボリックリンク・相対パスを検査する。ディレクトリ一覧・任意ファイル・POST・任意コマンド実行はない。CSPは外部通信を許可しない。元OSV、学習state.tar、実行ログ、ジョブ設定、Spirula実行ファイルは配信しない。
+
+これは顧客用パッケージではない。元画像を含み、privacy/deliveryは未承認。別PC・クリーンプロファイル・通信遮断・1080p性能は別の試験が必要。現時点のHTTP実装は許可ファイルをメモリに読み込んで配信するため、大規模PLYの配信性能は未検証。
+
+## 撮影確認の来歴
+
+`capture-check`はjob.jsonと成功成果物のハッシュを確認し、過去の設定・成果物・対象ID・参照を履歴へ残す。生成前の確認も可能で、その場合は成果物集合が空と明示される。必要に応じてファイルを指定できる。
+
+```sh
+python3 -m fs_capture capture-check work/room-02 入口 \
+  --status NEEDS_CAPTURE --reviewer operator --note '別方向の撮影が必要' \
+  --reference extract:images/capture_00/cam0/00000.jpg
+```
+
+旧履歴に元々存在しなかった根拠ハッシュは後付けしない。比較対象を切り替えるA/B、派生ジョブ・上流再利用・処理量予算はPR3B、納品候補・用途別承認はPR4の独立変更として残る。

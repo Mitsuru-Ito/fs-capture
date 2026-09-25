@@ -48,6 +48,20 @@ def main(argv=None):
     qa.add_argument("--status", required=True, choices=("CAPTURED", "NEEDS_CAPTURE", "NOT_TESTED"))
     qa.add_argument("--note", required=True)
     qa.add_argument("--reviewer", required=True)
+    qa.add_argument("--reference", action="append", default=[], help="確認対象 stage:relative/path を指定（繰り返し可）")
+    preview = sub.add_parser("preview", help="最終PLYの内部3D確認画面を作成・ローカル配信")
+    preview.add_argument("job")
+    preview.add_argument("--viewer-assets", required=True, help="固定版Spirulaソースのルート（取得は行わない）")
+    preview.add_argument("--fov", type=float, default=90)
+    preview.add_argument("--size", type=int, default=768)
+    preview.add_argument("--port", type=int, default=8768)
+    preview.add_argument("--prepare-only", action="store_true")
+    ps = sub.add_parser("preview-serve", help="既存プレビューと取り込んだ視点をローカル配信")
+    ps.add_argument("preview")
+    ps.add_argument("--port", type=int, default=8768)
+    pi = sub.add_parser("preview-import", help="ブラウザから保存した視点・判定・証拠を検査して取り込む")
+    pi.add_argument("preview")
+    pi.add_argument("record")
     for action in ("plan", "run"):
         p = sub.add_parser(action, help="実行コマンドを表示" if action == "plan" else "1段階を実行")
         p.add_argument("job")
@@ -66,7 +80,18 @@ def main(argv=None):
                                     args.source, args.check_gpu, args.job)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return code
-        if args.action == "init":
+        if args.action in ("preview", "preview-serve", "preview-import"):
+            from .preview import prepare, serve, import_review
+            if args.action == "preview-import":
+                result = import_review(args.preview, args.record)
+            else:
+                folder = prepare(args.job, args.viewer_assets, args.fov, args.size) if args.action == "preview" else Path(args.preview)
+                if args.action == "preview" and args.prepare_only:
+                    result = {"preview": str(folder)}
+                else:
+                    serve(folder, args.port)
+                    return 0
+        elif args.action == "init":
             result = create(args.source, args.job, args.fps, args.iterations, args.spirula, args.ffprobe,
                             args.mask_model, args.decoder, args.ffmpeg)
         elif args.action == "init-manifest":
@@ -74,7 +99,7 @@ def main(argv=None):
         elif args.action == "report":
             result = report(args.job)
         elif args.action == "capture-check":
-            result = capture_check(args.job, args.label, args.status, args.note, args.reviewer)
+            result = capture_check(args.job, args.label, args.status, args.note, args.reviewer, args.reference)
         elif args.action == "status":
             result = read(Path(args.job) / "state.json")
         elif args.action == "plan":
