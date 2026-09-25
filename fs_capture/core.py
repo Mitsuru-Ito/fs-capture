@@ -245,13 +245,7 @@ def validate(stage, folder, config, state=None):
         models = list((folder / "sparse").glob("*/images.bin"))
         if len(models) != 1:
             raise CaptureError("復元が空または複数モデルに分断されています。ログと撮影経路を確認してください。")
-        for name in ("cameras.bin", "images.bin", "points3D.bin"):
-            p = models[0].parent / name
-            with p.open("rb") as f:
-                data = f.read(8)
-            if len(data) < 8 or struct.unpack("<Q", data)[0] < 1:
-                raise CaptureError(f"SfMの {name} が空です。")
-        poses = read_poses(models[0])
+        poses, model_stats = check_sfm_model(models[0].parent)
         if len(poses) < 3:
             raise CaptureError("位置推定に成功した画像が3枚未満です。")
         extracted = successful(state, "extract")
@@ -264,7 +258,7 @@ def validate(stage, folder, config, state=None):
             raise CaptureError("SfM画像名が元の抽出画像と対応していません。")
         write(folder / "source-index.json", source_index)
         write(folder / "cameras.json", {"coordinates": "SfM output; world-to-camera; quaternion wxyz", "cameras": poses})
-        return {"model": models[0].parent.relative_to(folder).as_posix(), "geometryReviewRequired": True,
+        return {**model_stats, "model": models[0].parent.relative_to(folder).as_posix(), "geometryReviewRequired": True,
                 "registeredImages": len(poses), "extractedImages": len(known),
                 "registeredTimestamps": sum(bool(f["registeredImages"]) for f in source_index["frames"]),
                 "extractedTimestamps": len(source_index["frames"])}
@@ -274,35 +268,121 @@ def validate(stage, folder, config, state=None):
     return check_ply(ply)
 
 
-def read_poses(path):
-    poses = []
-    with path.open("rb") as f:
-        count = struct.unpack("<Q", f.read(8))[0]
-        if count > path.stat().st_size // 73:
-            raise CaptureError("images.binの画像数が不正です。")
-        for _ in range(count):
-            row = struct.unpack("<i7di", f.read(64))
-            if not all(math.isfinite(v) for v in row[1:8]):
-                raise CaptureError("カメラ姿勢にNaN/Infがあります。")
+# Parameter counts in the pinned Spirula COLMAP binary format (models 0..17).
+CAMERA_PARAMETERS = (3, 4, 4, 5, 8, 8, 12, 5, 4, 5, 12, 14, 4, 5, 4, 5, 6, 2)
+
+
+class BinaryReader:
+    def __init__(self, stream):
+        self.stream = stream
+        self.size = os.fstat(stream.fileno()).st_size
+        self.name = Path(stream.name).name
+
+    def fail(self, reason):
+        raise CaptureError(f"{self.name}: {reason}")
+
+    def unpack(self, fmt):
+        size = struct.calcsize(fmt)
+        data = self.stream.read(size)
+        if len(data) != size:
+            self.fail("本体またはヘッダーが欠損しています。")
+        return struct.unpack(fmt, data)
+
+    def count(self, minimum_bytes, nonempty=False):
+        count, = self.unpack("<Q")
+        if (nonempty and not count) or count > (self.size - self.stream.tell()) // minimum_bytes:
+            self.fail("件数が空、または本体サイズと一致しません。")
+        return count
+
+    def end(self):
+        if self.stream.read(1):
+            self.fail("予期しない余剰データがあります。")
+
+
+def read_images(path):
+    poses, observations = [], {}
+    with Path(path).open("rb") as f:
+        r = BinaryReader(f)
+        for _ in range(r.count(73, nonempty=True)):
+            row = r.unpack("<i7di")
+            if row[0] < 0 or row[0] in observations or row[8] < 0:
+                r.fail("画像IDが重複、またはIDが不正です。")
+            if not all(math.isfinite(v) for v in row[1:8]) or not any(row[1:5]):
+                r.fail("カメラ姿勢が不正です。")
             name = bytearray()
             while True:
                 b = f.read(1)
                 if b == b"\0":
                     break
-                if not b or len(name) > 8192:
-                    raise CaptureError("images.binの画像名が不正です。")
+                if not b or len(name) >= 8192:
+                    r.fail("画像名が不正です。")
                 name += b
-            points = struct.unpack("<Q", f.read(8))[0]
-            if points * 24 > path.stat().st_size - f.tell():
-                raise CaptureError("images.binの観測データが欠損しています。")
-            f.seek(points * 24, 1)
+            try:
+                image = name.decode("utf-8")
+            except UnicodeDecodeError:
+                r.fail("画像名がUTF-8ではありません。")
+            if not image:
+                r.fail("画像名が空です。")
+            refs = []
+            for _ in range(r.count(24)):
+                x, y, point = r.unpack("<ddq")
+                if not all(math.isfinite(v) for v in (x, y)) or point < -1:
+                    r.fail("2D観測値が不正です。")
+                refs.append(point)
+            observations[row[0]] = refs
             poses.append({"id": row[0], "qvec": row[1:5], "tvec": row[5:8],
-                          "cameraId": row[8], "image": name.decode("utf-8")})
-        if f.read(1):
-            raise CaptureError("images.binに予期しない余剰データがあります。")
+                          "cameraId": row[8], "image": image})
+        r.end()
     if len({p["image"] for p in poses}) != len(poses):
         raise CaptureError("SfM画像名が重複しています。")
-    return poses
+    return poses, observations
+
+
+def read_poses(path):
+    return read_images(path)[0]
+
+
+def check_sfm_model(folder):
+    cameras = set()
+    with (folder / "cameras.bin").open("rb") as f:
+        r = BinaryReader(f)
+        for _ in range(r.count(40, nonempty=True)):
+            cid, model, width, height = r.unpack("<iiQQ")
+            if cid < 0 or cid in cameras or not width or not height:
+                r.fail("カメラIDまたは画像サイズが不正です。")
+            if not 0 <= model < len(CAMERA_PARAMETERS):
+                r.fail(f"未対応のカメラモデルID: {model}")
+            params = r.unpack("<" + "d" * CAMERA_PARAMETERS[model])
+            if not all(math.isfinite(v) for v in params):
+                r.fail("内部パラメータにNaN/Infがあります。")
+            cameras.add(cid)
+        r.end()
+    poses, observations = read_images(folder / "images.bin")
+    if any(p["cameraId"] not in cameras for p in poses):
+        raise CaptureError("images.binが存在しないカメラを参照しています。")
+    points, tracks = set(), set()
+    with (folder / "points3D.bin").open("rb") as f:
+        r = BinaryReader(f)
+        for _ in range(r.count(51, nonempty=True)):
+            row = r.unpack("<Q3d3Bd")
+            pid = row[0]
+            if pid in points or pid >= 2**63 or not all(math.isfinite(v) for v in (*row[1:4], row[7])) or row[7] < 0:
+                r.fail("点ID、座標または再投影誤差が不正です。")
+            points.add(pid)
+            for _ in range(r.count(8, nonempty=True)):
+                iid, index = r.unpack("<ii")
+                ref = (iid, index)
+                if iid not in observations or not 0 <= index < len(observations[iid]):
+                    r.fail("トラックの画像・2D観測参照が不正です。")
+                if ref in tracks or observations[iid][index] != pid:
+                    r.fail("トラックが重複、または画像側の3D点参照と一致しません。")
+                tracks.add(ref)
+        r.end()
+    for iid, refs in observations.items():
+        for index, pid in enumerate(refs):
+            if pid != -1 and (pid not in points or (iid, index) not in tracks):
+                raise CaptureError("images.binの3D点参照に対応するトラックがありません。")
+    return poses, {"cameras": len(cameras), "points3D": len(points), "observations": len(tracks)}
 
 
 def execute(argv, log):
@@ -332,51 +412,60 @@ def execute(argv, log):
 def run(job, stage):
     job = Path(job).resolve()
     with locked(job):
-        config, state = read(job / "job.json"), read(job / "state.json")
-        if digest(job / "job.json") != state["configSha256"]:
-            raise CaptureError("設定が作成時から変更されています。新規ジョブを作成してください。")
+        state = read(job / "state.json")
+        if stage not in STAGES:
+            raise CaptureError(f"不明な段階: {stage}")
         if state["stages"].get(stage, {}).get("status") == "succeeded":
             raise CaptureError("成功済みの段階は再実行しません。条件を変える場合は新規ジョブを作成してください。")
-        if digest(config["source"]["path"]) != config["source"]["sha256"]:
-            raise CaptureError("入力ファイルが作成時から変更されています。")
-        s = config["settings"]
-        if s["maskModel"] and digest(s["maskModel"]) != s["maskModelSha256"]:
-            raise CaptureError("マスクモデルが作成時から変更されています。")
-        if stage in ("mask", "sfm", "train"):
-            reviewed(state, "extract")
-        if stage in ("sfm", "train") and s["maskModel"]:
-            reviewed(state, "mask")
-        if stage == "train":
-            reviewed(state, "sfm")
-        is_ffmpeg = stage == "extract" and s.get("decoder") == "ffmpeg"
-        executable = tool(s["ffmpeg"] if is_ffmpeg else s["spirula"])
-        version = capture([executable, *(["-version"] if is_ffmpeg else ["sfm", "--version"])]).strip()
-        if not is_ffmpeg and SPIRULA_VERSION not in version:
-            raise CaptureError(f"対応版はSpirula {SPIRULA_VERSION}です。検出: {version}")
-        binary = {"path": executable, "sha256": digest(executable), "version": version}
-        engine_key = "decoder" if is_ffmpeg else "engine"
-        if state.get(engine_key) and state[engine_key] != binary:
-            raise CaptureError("Spirula実行ファイルが変更されています。新規ジョブを作成してください。")
-        state[engine_key] = binary
         attempt = job / "attempts" / (stage + "-" + uuid.uuid4().hex[:12])
         output = attempt / "output"
-        output.mkdir(parents=True)
-        if is_ffmpeg:
-            for cam in ("cam0", "cam1"):
-                (output / "images" / cam).mkdir(parents=True)
-        argv_list = commands(config, state, stage, output)
-        for argv in argv_list:
-            argv[0] = executable
-        write(attempt / "commands.json", argv_list)
-        record = {"status": "running", "output": str(output), "attempt": str(attempt), "startedAt": time.time()}
+        attempt.mkdir(parents=True)
+        record = {"status": "running", "phase": "preflight", "output": str(output),
+                  "attempt": str(attempt), "startedAt": time.time()}
         state["stages"][stage] = record
         state["status"] = "running"
         write(job / "state.json", state)
         try:
+            config = read(job / "job.json")
+            if digest(job / "job.json") != state["configSha256"]:
+                raise CaptureError("設定が作成時から変更されています。新規ジョブを作成してください。")
+            if digest(config["source"]["path"]) != config["source"]["sha256"]:
+                raise CaptureError("入力ファイルが作成時から変更されています。")
+            s = config["settings"]
+            if s["maskModel"] and digest(s["maskModel"]) != s["maskModelSha256"]:
+                raise CaptureError("マスクモデルが作成時から変更されています。")
+            if stage in ("mask", "sfm", "train"):
+                reviewed(state, "extract")
+            if stage in ("sfm", "train") and s["maskModel"]:
+                reviewed(state, "mask")
+            if stage == "train":
+                reviewed(state, "sfm")
+            is_ffmpeg = stage == "extract" and s.get("decoder") == "ffmpeg"
+            executable = tool(s["ffmpeg"] if is_ffmpeg else s["spirula"])
+            version = capture([executable, *(["-version"] if is_ffmpeg else ["sfm", "--version"])]).strip()
+            if not is_ffmpeg and SPIRULA_VERSION not in version:
+                raise CaptureError(f"対応版はSpirula {SPIRULA_VERSION}です。検出: {version}")
+            binary = {"path": executable, "sha256": digest(executable), "version": version}
+            engine_key = "decoder" if is_ffmpeg else "engine"
+            if state.get(engine_key) and state[engine_key] != binary:
+                raise CaptureError("実行ファイルが変更されています。新規ジョブを作成してください。")
+            state[engine_key] = binary
+            output.mkdir()
+            if is_ffmpeg:
+                for cam in ("cam0", "cam1"):
+                    (output / "images" / cam).mkdir(parents=True)
+            argv_list = commands(config, state, stage, output)
+            for argv in argv_list:
+                argv[0] = executable
+            write(attempt / "commands.json", argv_list)
+            record["phase"] = "execute"
+            write(job / "state.json", state)
             for i, argv in enumerate(argv_list):
                 execute(argv, attempt / f"{i:02d}.log")
+            record["phase"] = "validate"
             record["validation"] = validate(stage, output, config, state)
             record["status"] = "succeeded"
+            record["phase"] = "complete"
             state["status"] = "awaiting_review"
         except BaseException as exc:
             record["status"] = "cancelled" if isinstance(exc, KeyboardInterrupt) else "failed"
@@ -386,6 +475,7 @@ def run(job, stage):
         finally:
             record["finishedAt"] = time.time()
             write(job / "state.json", state)
+            write(attempt / "result.json", record)
     return state
 
 

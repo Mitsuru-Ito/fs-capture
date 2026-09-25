@@ -5,16 +5,22 @@ import subprocess
 import struct
 import sys
 
-from .core import (STAGES, SPIRULA_VERSION, CaptureError, capture, commands,
-                   create, read, review, run, tool)
+from .core import (STAGES, CaptureError, commands,
+                   create, read, review, run)
+from .diagnostics import diagnose
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="FS Capture: Osmo 360実素材の段階的な3DGS検証")
     sub = parser.add_subparsers(dest="action", required=True)
-    doctor = sub.add_parser("doctor", help="外部ツールの導入状況を確認")
+    doctor = sub.add_parser("doctor", help="導入・入力・デコード・GPU・既存学習記録を分けて診断")
     doctor.add_argument("--spirula", default="spirula")
     doctor.add_argument("--ffprobe", default="ffprobe")
+    doctor.add_argument("--ffmpeg", default="ffmpeg")
+    doctor.add_argument("--decoder", choices=("spirula", "ffmpeg"), default="spirula")
+    doctor.add_argument("--source", help="メタデータとFFmpeg経路の先頭フレームを検査するOSV")
+    doctor.add_argument("--check-gpu", action="store_true", help="SpirulaのGPU列挙を実行")
+    doctor.add_argument("--job", help="既存ジョブの学習成功記録と最終PLYを照合（再学習しない）")
     init = sub.add_parser("init", help="OSVを検査し、入力ハッシュと設定を保存")
     init.add_argument("source")
     init.add_argument("job")
@@ -40,21 +46,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.action == "doctor":
-            result = {"requiredSpirulaVersion": SPIRULA_VERSION, "tools": {}}
-            okay = True
-            for name, executable, flags in (("spirula", args.spirula, ["sfm", "--version"]),
-                                            ("ffprobe", args.ffprobe, ["-version"])):
-                try:
-                    path = tool(executable)
-                    version = capture([path, *flags]).splitlines()[0]
-                    compatible = name != "spirula" or SPIRULA_VERSION in version
-                    result["tools"][name] = {"path": path, "version": version, "compatible": compatible}
-                    okay &= compatible
-                except (CaptureError, subprocess.TimeoutExpired) as exc:
-                    result["tools"][name] = {"error": str(exc)}
-                    okay = False
+            result, code = diagnose(args.spirula, args.ffprobe, args.ffmpeg, args.decoder,
+                                    args.source, args.check_gpu, args.job)
             print(json.dumps(result, ensure_ascii=False, indent=2))
-            return 0 if okay else 1
+            return code
         if args.action == "init":
             result = create(args.source, args.job, args.fps, args.iterations, args.spirula, args.ffprobe,
                             args.mask_model, args.decoder, args.ffmpeg)
