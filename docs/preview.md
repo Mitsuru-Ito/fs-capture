@@ -9,7 +9,9 @@ python3 -m fs_capture preview work/room-02 \
   --viewer-assets /path/to/spirula-studio-source --port 8768
 ```
 
-表示されたlocalhost URLを開く。`--viewer-assets`にはSpirulaの**ソースルート**を指定する。`viewer/`自体ではない。既存の単一schema 1・複数schema 2のジョブに対応し、成功時ハッシュを持つextract/mask/sfm/trainを要求する。extract/mask/sfmは従来のreview合格が必要。trainの画質reviewはプレビュー後に実施するため、起動の前提にしない。途中PLYは選ばない。
+表示されたlocalhost URLを開く。`--viewer-assets`にはSpirulaの**ソースルート**を指定する。`viewer/`自体ではない。既存の単一schema 1・複数schema 2のジョブに対応し、成功時ハッシュを持つextract/sfm/trainを要求する。マスクを指定したジョブはmaskも必須。extract/sfmと適用したmaskは従来のreview合格が必要。trainの画質reviewはプレビュー後に実施するため、起動の前提にしない。途中PLYは選ばない。
+
+マスクなしジョブは「マスク未適用」と表示し、重ね表示とマスクリンクを無効にする。全白の代替マスクは作らない。マスクありジョブの消失・改変・未承認は引き続き拒否する。どちらも内部確認用で、公開審査の代わりにはならない。
 
 参照版は[Spirula Studio cd93c75114f591419e394328ba76f33b721da73a](https://github.com/harry7557558/spirula-studio/tree/cd93c75114f591419e394328ba76f33b721da73a)。取得済みのソースを利用し、自動取得・ビルドはしない。`preview_assets/runtime.json`の全ファイルSHA-256を検査し、実際に必要な描画モジュール・WASM・LICENSEだけをローカル出力へコピーする。元ランタイムはGPLv3。本リポジトリのライセンスを新設・変更しておらず、この構成を顧客へ配布する権利確認は別工程。依存物をGitへ同梱しない。
 
@@ -23,7 +25,7 @@ python3 -m fs_capture preview-serve work/room-02/previews/PREVIEW_ID --port 8768
 
 1. 撮影位置を選ぶ。左右・前後へ移動でき、15度ずつ見回せる。移動量は未校正のarbitrary units。衝突判定はない。
 2. 元画像とマスクの重ね表示を確認する。「開始位置へ戻る」は最初の撮影カメラへ戻る。
-3. 確認箇所、用途、担当者、判定、理由を入力し「視点・判定・証拠を保存」を押す。
+3. 確認箇所、用途、担当者、判定、理由を入力し「現在の視点・判定・理由を確認した」をチェックして「保存用JSONを作成」を押す。撮影位置・移動・見回し・ホームで判定はNOT_TESTEDに戻る。担当者・用途・理由等の入力は下書きとして残る。以前の書き出しリンクも破棄し、再確認なしに新視点のPASS/FAILを書き出せない。
 4. 表示された保存リンクからJSONを保存する。ダウンロードが制限される環境は「JSONをコピー」の内容をUTF-8ファイルに保存する。ブラウザの保存完了をアプリは推測しない。
 5. 次のコマンドで取り込み、画面を再読み込みする。「保存済み視点」から復元できる。
 
@@ -32,6 +34,8 @@ python3 -m fs_capture preview-import work/room-02/previews/PREVIEW_ID review.jso
 ```
 
 サーバは読み取り専用。確認結果の取り込みはCLIだけが行う。`reviews/`へUUID付きの記録とPNGを追記し、以前の判断を上書きしない。取り込みではモデル・描画コード・カメラ・投影を含むbundle識別、視点の有限値と直交軸、SH次数、PNGの構造・CRC・解凍結果・解像度を検査する。確認者の記述が正しいかを自動判定するものではない。機密画像を含むため確認JSON・PNGも内部データとして扱う。
+
+復元時は過去の判定を別表示し、入力を下書きへ戻す。新しい判定として保存する場合は再確認が必要。保存用JSON作成、ブラウザへの保存要求、CLI取り込み済みを分けて表示する。ブラウザ保存経路の実ファイル・再起動・復元の受入は利用環境で確認する。CLIやDOMテストを実ブラウザの証拠にしない。
 
 画質QAは指定用途・視点のPASS/FAIL/NOT_TESTED/UNKNOWNのみ。processは成果物検査の結果。navigation/privacy/deliveryはNOT_TESTEDのままで、この画面から合格に変更できない。適用不要の理由を扱う納品向け契約はPR4で追加する。画質FAILでも再確認用の保存・復元は可能。
 

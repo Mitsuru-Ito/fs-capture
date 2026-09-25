@@ -75,8 +75,12 @@ def prepare(job, runtime, fov=90, size=768):
         config, state = c.read(root/'job.json'), c.read(root/'state.json')
         if c.digest(root/'job.json') != state['configSha256']:
             raise c.CaptureError('ジョブ設定が変更されています。')
-        outputs = {s: checked_output(state, s) for s in ('extract', 'mask', 'sfm', 'train')}
-        for s in ('extract', 'mask', 'sfm'):
+        masked = c.has_masks(config)
+        required = ('extract', 'mask', 'sfm') if masked else ('extract', 'sfm')
+        if not masked and state['stages'].get('mask', {}).get('status') == 'succeeded':
+            raise c.CaptureError('Mask output conflicts with unmasked job configuration')
+        outputs = {s: checked_output(state, s) for s in (*required, 'train')}
+        for s in required:
             c.reviewed(state, s)
         c.inspect_artifacts('sfm', outputs['sfm'], config, state)
         c.inspect_artifacts('train', outputs['train'], config, state)
@@ -123,7 +127,7 @@ def prepare(job, runtime, fov=90, size=768):
                         source={k: source[k] for k in ('captureId', 'mode', 'frameIndex', 'approximateSeconds') if k in source})
             view['source']['cameraId'] = Path(p['image']).parent.name
             view['imageUrl'] = add(safe_file(outputs['extract'], source['image']), f'images/{i}.jpg')
-            view['maskUrl'] = add(safe_file(outputs['mask'], mask_name), f'masks/{i}.png')
+            view['maskUrl'] = add(safe_file(outputs['mask'], mask_name), f'masks/{i}.png') if masked else None
             views.append(view)
         sidecar = {'schemaVersion': 1, 'units': 'arbitrary units', 'worldFromReconstruction': IDENTITY,
                    'trainingTransformSha256': c.digest(train/'scene_transform.json'), 'views': views,
@@ -146,6 +150,7 @@ def prepare(job, runtime, fov=90, size=768):
                               'sh': 'full degree; no silent fallback', 'shDegree': sh_degree, 'packing': 'float16 attributes / snorm8 SH',
                               'background': [0, 0, 0], 'exposure': 1, 'transfer': 0, 'gamut': 'Rec.709'},
                  'training': {'primitive': primitive, 'configSha256': c.digest(train/'config.json')},
+                 'masking': 'APPLIED' if masked else 'NOT_APPLIED',
                  'process': 'PASS', 'visual': 'NOT_TESTED', 'navigation': 'NOT_TESTED',
                  'privacy': 'NOT_TESTED', 'delivery': 'NOT_TESTED'}
         c.write(folder/'scene.json', scene)

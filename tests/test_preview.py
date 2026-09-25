@@ -47,6 +47,10 @@ class PoseTests(unittest.TestCase):
     def test_actual_browser_projection_module(self):
         subprocess.run(['node','--test',str(Path(__file__).with_name('projection.test.mjs'))],check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
 
+    @unittest.skipUnless(shutil.which('node'),'Node is needed for UI contract tests')
+    def test_ui_context_contract_without_browser(self):
+        subprocess.run(['node','--test',str(Path(__file__).with_name('preview-ui.test.mjs'))],check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+
 
 class CaptureHistoryTests(unittest.TestCase):
     setUp=test_pipeline.PipelineTests.setUp
@@ -86,7 +90,7 @@ class PreviewTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory()
         self.root=Path(self.tmp.name).resolve()
         self.job=self.root/'job';self.job.mkdir()
-        self.config={'settings':{'iterations':1}}
+        self.config={'settings':{'iterations':1,'maskModel':'synthetic-mask-model'}}
         c.write(self.job/'job.json',self.config)
         self.state={'configSha256':c.digest(self.job/'job.json'),'stages':{},'reviews':{}}
         self.outputs={s:self.job/s for s in ('extract','mask','sfm','train')}
@@ -139,6 +143,28 @@ class PreviewTests(unittest.TestCase):
 
     def test_modified_success_artifact_blocks_preview(self):
         (self.outputs['train']/'training/step-000000001.ckpt/splat.ply').write_bytes(b'bad')
+        with self.assertRaises(c.CaptureError):self.prepare()
+
+    def test_no_mask_job_previews_without_fake_mask(self):
+        self.config['settings']['maskModel']=None
+        c.write(self.job/'job.json',self.config)
+        self.state['configSha256']=c.digest(self.job/'job.json')
+        del self.state['stages']['mask'];del self.state['reviews']['mask']
+        c.write(self.job/'state.json',self.state)
+        folder=self.prepare()
+        self.assertEqual(c.read(folder/'scene.json')['masking'],'NOT_APPLIED')
+        self.assertTrue(all(v['maskUrl'] is None for v in c.read(folder/'cameras.json')['views']))
+        self.assertFalse((folder/'masks').exists())
+
+    def test_required_masks_missing_corrupt_or_unreviewed_are_rejected(self):
+        mask=self.outputs['mask']/'masks/cam0/00000.png'
+        original=mask.read_bytes()
+        for bad in (None,b'broken'):
+            if bad is None:mask.unlink()
+            else:mask.write_bytes(bad)
+            with self.assertRaises(c.CaptureError):self.prepare()
+            mask.write_bytes(original)
+        self.state['reviews']['mask']['passed']=False;c.write(self.job/'state.json',self.state)
         with self.assertRaises(c.CaptureError):self.prepare()
 
     def test_unreviewed_sfm_blocks_but_unreviewed_train_is_allowed(self):
