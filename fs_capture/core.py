@@ -43,8 +43,15 @@ def digest(path):
 
 def fingerprint(folder):
     root = Path(folder)
-    return {p.relative_to(root).as_posix(): digest(p)
-            for p in sorted(root.rglob("*")) if p.is_file()}
+    if not root.is_dir():
+        raise CaptureError(f"成果物ディレクトリがありません: {root}")
+    paths = sorted(root.rglob("*"))
+    if any(p.is_symlink() for p in paths):
+        raise CaptureError("成果物のシンボリックリンクは受け付けません。")
+    result = {p.relative_to(root).as_posix(): digest(p) for p in paths if p.is_file()}
+    if not result:
+        raise CaptureError("成果物が空です。")
+    return result
 
 
 def tool(name):
@@ -136,7 +143,8 @@ def successful(state, stage):
 def reviewed(state, stage):
     folder = successful(state, stage)
     review = state["reviews"].get(stage, {})
-    if not review.get("passed") or review.get("artifacts") != fingerprint(folder):
+    snapshot = state["stages"][stage].get("artifacts")
+    if not snapshot or not review.get("passed") or review.get("artifacts") != snapshot or snapshot != fingerprint(folder):
         raise CaptureError(f"{stage} の成果物の品質確認が必要です。reviewコマンドで結果と根拠を記録してください。")
 
 
@@ -212,7 +220,7 @@ def check_ply(path):
     return {"gaussians": count, "sha256": digest(path)}
 
 
-def validate(stage, folder, config, state=None):
+def normalize_outputs(stage, folder, config, state):
     if stage == "extract":
         if config["settings"].get("decoder") == "ffmpeg":
             for cam in ("cam0", "cam1"):
@@ -221,24 +229,44 @@ def validate(stage, folder, config, state=None):
                     if p.stem != f"decoded_{i:08d}":
                         raise CaptureError("FFmpeg抽出画像の連番が欠落しています。")
                     p.rename(p.with_name(f"{i * config['settings']['skip']:05d}.jpg"))
+    if stage == "mask":
+        for cam in ("cam0", "cam1"):
+            images = sorted((successful(state, "extract") / "images" / cam).glob("*.jpg"))
+            masks = sorted((folder / "masks" / cam).glob("frame_*.png"))
+            if len(masks) != len(images):
+                raise CaptureError("画像とマスクの枚数が不一致です。")
+            for i, image in enumerate(images):
+                source = folder / "masks" / cam / f"frame_{i:05d}.png"
+                source.rename(source.with_name(image.stem + ".png"))
+
+
+def validate(stage, folder, config, state=None):
+    normalize_outputs(stage, folder, config, state)
+    return inspect_artifacts(stage, folder, config, state, write_metadata=True)
+
+
+def inspect_artifacts(stage, folder, config, state=None, *, write_metadata=False):
+    """Read-only by default; only run's finalization creates index sidecars."""
+    if stage == "extract":
         a = sorted((folder / "images/cam0").glob("*.jpg"))
         b = sorted((folder / "images/cam1").glob("*.jpg"))
         if len(a) < 3 or [p.name for p in a] != [p.name for p in b] or any(p.stat().st_size == 0 for p in a + b):
             raise CaptureError("抽出画像が不足、空、または2トラック間で同期していません。")
         index = [{"frameIndex": int(p.stem), "approximateSeconds": int(p.stem) / config["settings"]["sourceFps"],
                   "images": [f"images/cam0/{p.name}", f"images/cam1/{p.name}"]} for p in a]
-        write(folder / "source-index.json", {"timeBasis": "frameIndex/sourceFps (approximate, not PTS)", "frames": index})
+        metadata = {"timeBasis": "frameIndex/sourceFps (approximate, not PTS)", "frames": index}
+        if write_metadata:
+            write(folder / "source-index.json", metadata)
+        elif read(folder / "source-index.json") != metadata:
+            raise CaptureError("抽出インデックスが画像と一致しません。")
         return {"timestamps": len(a), "images": len(a) * 2}
     if stage == "mask":
         total = 0
         for cam in ("cam0", "cam1"):
             images = sorted((successful(state, "extract") / "images" / cam).glob("*.jpg"))
-            masks = sorted((folder / "masks" / cam).glob("frame_*.png"))
-            if len(masks) != len(images) or any(p.stat().st_size == 0 for p in masks):
-                raise CaptureError("画像とマスクの枚数が不一致、または空のマスクがあります。")
-            # SAM track numbers output sequentially; SfM matches the input stems.
-            for i, p in enumerate(images):
-                (folder / "masks" / cam / f"frame_{i:05d}.png").rename(folder / "masks" / cam / (p.stem + ".png"))
+            masks = sorted((folder / "masks" / cam).glob("*.png"))
+            if [p.stem for p in images] != [p.stem for p in masks] or any(p.stat().st_size == 0 for p in masks):
+                raise CaptureError("画像とマスクの対応が不一致、または空です。")
             total += len(masks)
         return {"masks": total}
     if stage == "sfm":
@@ -256,8 +284,12 @@ def validate(stage, folder, config, state=None):
         known = {n.removeprefix("images/") for f in source_index["frames"] for n in f["images"]}
         if not names.issubset(known):
             raise CaptureError("SfM画像名が元の抽出画像と対応していません。")
-        write(folder / "source-index.json", source_index)
-        write(folder / "cameras.json", {"coordinates": "SfM output; world-to-camera; quaternion wxyz", "cameras": poses})
+        cameras = {"coordinates": "SfM output; world-to-camera; quaternion wxyz", "cameras": poses}
+        if write_metadata:
+            write(folder / "source-index.json", source_index)
+            write(folder / "cameras.json", cameras)
+        elif read(folder / "source-index.json") != source_index or read(folder / "cameras.json") != json.loads(json.dumps(cameras)):
+            raise CaptureError("SfMのインデックス・カメラ情報が本体と一致しません。")
         return {**model_stats, "model": models[0].parent.relative_to(folder).as_posix(), "geometryReviewRequired": True,
                 "registeredImages": len(poses), "extractedImages": len(known),
                 "registeredTimestamps": sum(bool(f["registeredImages"]) for f in source_index["frames"]),
@@ -464,6 +496,7 @@ def run(job, stage):
                 execute(argv, attempt / f"{i:02d}.log")
             record["phase"] = "validate"
             record["validation"] = validate(stage, output, config, state)
+            record["artifacts"] = fingerprint(output)
             record["status"] = "succeeded"
             record["phase"] = "complete"
             state["status"] = "awaiting_review"
@@ -488,7 +521,28 @@ def review(job, stage, passed, note):
         folder = successful(state, stage)
         if any(state["stages"].get(s, {}).get("status") == "succeeded" for s in STAGES[STAGES.index(stage) + 1:]):
             raise CaptureError("後続段階が存在します。上流の品質判定を変える場合は新規ジョブを作成してください。")
-        state["reviews"][stage] = {"passed": passed, "note": note, "at": time.time(), "artifacts": fingerprint(folder)}
+        entry = {"passed": False, "note": note, "at": time.time()}
+        if passed:
+            try:
+                config = read(job / "job.json")
+                if digest(job / "job.json") != state["configSha256"]:
+                    raise CaptureError("設定が変更されています。")
+                snapshot = state["stages"][stage].get("artifacts")
+                if not snapshot:
+                    raise CaptureError("成功時の成果物ハッシュがない旧試行です。新規ジョブで再実行してください。")
+                if fingerprint(folder) != snapshot:
+                    raise CaptureError("成果物が成功時から変更されています。手編集は新規ジョブで処理してください。")
+                inspect_artifacts(stage, folder, config, state)
+                if fingerprint(folder) != snapshot:
+                    raise CaptureError("検査中に成果物が変更されました。")
+                entry.update(passed=True, artifacts=snapshot)
+            except (CaptureError, OSError, ValueError, KeyError, struct.error) as exc:
+                entry['error'] = str(exc)
+                state['reviews'][stage] = entry
+                state['status'] = 'rejected'
+                write(job / 'state.json', state)
+                raise
+        state["reviews"][stage] = entry
         state["status"] = "reviewed" if passed else "rejected"
         write(job / "state.json", state)
     return state
