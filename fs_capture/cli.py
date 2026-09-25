@@ -8,6 +8,8 @@ import sys
 from .core import (STAGES, CaptureError, commands,
                    create, read, review, run)
 from .diagnostics import diagnose
+from .collection import create_manifest
+from .report import report, capture_check
 
 
 def main(argv=None):
@@ -32,6 +34,20 @@ def main(argv=None):
     init.add_argument("--decoder", choices=("spirula", "ffmpeg"), default="spirula",
                       help="Mac等でVulkan動画デコードが使えない場合はffmpeg")
     init.add_argument("--ffmpeg", default="ffmpeg")
+    manifest = sub.add_parser("init-manifest", help="複数OSVのmanifestを新規ジョブに登録")
+    manifest.add_argument("manifest")
+    manifest.add_argument("job")
+    manifest.add_argument("--spirula", default="spirula")
+    manifest.add_argument("--ffprobe", default="ffprobe")
+    manifest.add_argument("--ffmpeg", default="ffmpeg")
+    rep = sub.add_parser("report", help="内部用の画像・マスク・登録状態レポートを生成")
+    rep.add_argument("job")
+    qa = sub.add_parser("capture-check", help="必須確認箇所の撮影状況を記録")
+    qa.add_argument("job")
+    qa.add_argument("label")
+    qa.add_argument("--status", required=True, choices=("CAPTURED", "NEEDS_CAPTURE", "NOT_TESTED"))
+    qa.add_argument("--note", required=True)
+    qa.add_argument("--reviewer", required=True)
     for action in ("plan", "run"):
         p = sub.add_parser(action, help="実行コマンドを表示" if action == "plan" else "1段階を実行")
         p.add_argument("job")
@@ -53,6 +69,12 @@ def main(argv=None):
         if args.action == "init":
             result = create(args.source, args.job, args.fps, args.iterations, args.spirula, args.ffprobe,
                             args.mask_model, args.decoder, args.ffmpeg)
+        elif args.action == "init-manifest":
+            result = create_manifest(args.manifest, args.job, args.spirula, args.ffprobe, args.ffmpeg)
+        elif args.action == "report":
+            result = report(args.job)
+        elif args.action == "capture-check":
+            result = capture_check(args.job, args.label, args.status, args.note, args.reviewer)
         elif args.action == "status":
             result = read(Path(args.job) / "state.json")
         elif args.action == "plan":

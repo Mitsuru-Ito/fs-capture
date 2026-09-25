@@ -7,7 +7,7 @@ import tempfile
 import time
 
 from .core import (SPIRULA_VERSION, CaptureError, capture, digest, probe, read,
-                   successful, tool, validate)
+                   successful, tool, validate, verify_sources)
 
 ERRORS = (CaptureError, OSError, ValueError, KeyError, ZeroDivisionError, struct.error, subprocess.TimeoutExpired)
 
@@ -101,8 +101,7 @@ def diagnose(spirula='spirula', ffprobe='ffprobe', ffmpeg='ffmpeg', decoder='spi
             if training.get('status') != 'succeeded':
                 checks['training'] = not_tested('指定ジョブに成功した学習記録がありません。')
             else:
-                if digest(config['source']['path']) != config['source']['sha256']:
-                    raise CaptureError('元入力が変更されています。')
+                verify_sources(config)
                 engine = state.get('engine', {})
                 executable = required('spirula')
                 if engine.get('path') != executable or engine.get('sha256') != digest(executable):

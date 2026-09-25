@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "imageWidth": 1920,
+  "training": {"iterations": 10000, "resolutionDivisor": 2, "capMax": 200000},
+  "captures": [
+    {"captureId": "front", "source": "../input/front/clip.OSV", "mode": "fixed", "frames": [0]},
+    {"captureId": "left", "source": "../input/left/clip.OSV", "mode": "fixed", "frames": [0]},
+    {"captureId": "right", "source": "../input/right/clip.OSV", "mode": "fixed", "frames": [0]},
+    {"captureId": "rear", "source": "../input/rear/clip.OSV", "mode": "fixed", "frames": [0]},
+    {"captureId": "center", "source": "../input/center/clip.OSV", "mode": "fixed", "frames": [0]}
+  ],
+  "masking": {
+    "root": "../input/masks",
+    "convention": "white-keep",
+    "categories": ["fisheye-boundary", "person", "manual"]
+  },
+  "checklist": ["対象設備の正面", "周囲の通路", "銘板の確認用写真"]
+}

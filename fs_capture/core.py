@@ -148,7 +148,22 @@ def reviewed(state, stage):
         raise CaptureError(f"{stage} の成果物の品質確認が必要です。reviewコマンドで結果と根拠を記録してください。")
 
 
+def has_masks(config):
+    return bool(config["settings"].get("maskModel") or config.get("maskSource"))
+
+
+def verify_sources(config):
+    if config.get("schemaVersion") == 2:
+        from .collection import verify_inputs
+        verify_inputs(config)
+    elif digest(config["source"]["path"]) != config["source"]["sha256"]:
+        raise CaptureError("入力ファイルが作成時から変更されています。")
+
+
 def commands(config, state, stage, output):
+    if config.get("schemaVersion") == 2 and stage != "train":
+        from .collection import commands as collection_commands
+        return collection_commands(config, state, stage, output)
     s = config["settings"]
     executable = s["spirula"]
     if stage == "extract":
@@ -186,10 +201,12 @@ def commands(config, state, stage, output):
             "--disable-viewer", "true", "--keep-viewer-alive", "false",
             "--auto-scale-poses", "false", "--scene-center", "none", "--train-frame", "points",
             "--warp-to-pinhole", "false", "--warp-spherical-to-pinhole", "false"]
-    if s["maskModel"]:
+    if has_masks(config):
         argv += ["--mask-dir", str(successful(state, "mask") / "masks")]
     else:
         argv += ["--load-masks", "false"]
+    if config.get("schemaVersion") == 2:
+        argv += ["--train-resolution-divisor", str(s['trainResolutionDivisor']), "--cap-max", str(s['capMax'])]
     return [argv]
 
 
@@ -221,6 +238,9 @@ def check_ply(path):
 
 
 def normalize_outputs(stage, folder, config, state):
+    if config.get("schemaVersion") == 2:
+        from .collection import normalize
+        return normalize(config, stage, folder)
     if stage == "extract":
         if config["settings"].get("decoder") == "ffmpeg":
             for cam in ("cam0", "cam1"):
@@ -247,6 +267,9 @@ def validate(stage, folder, config, state=None):
 
 def inspect_artifacts(stage, folder, config, state=None, *, write_metadata=False):
     """Read-only by default; only run's finalization creates index sidecars."""
+    if config.get("schemaVersion") == 2 and stage in ("extract", "mask"):
+        from .collection import inspect
+        return inspect(config, state, stage, folder, write_metadata)
     if stage == "extract":
         a = sorted((folder / "images/cam0").glob("*.jpg"))
         b = sorted((folder / "images/cam1").glob("*.jpg"))
@@ -461,18 +484,17 @@ def run(job, stage):
             config = read(job / "job.json")
             if digest(job / "job.json") != state["configSha256"]:
                 raise CaptureError("設定が作成時から変更されています。新規ジョブを作成してください。")
-            if digest(config["source"]["path"]) != config["source"]["sha256"]:
-                raise CaptureError("入力ファイルが作成時から変更されています。")
+            verify_sources(config)
             s = config["settings"]
             if s["maskModel"] and digest(s["maskModel"]) != s["maskModelSha256"]:
                 raise CaptureError("マスクモデルが作成時から変更されています。")
             if stage in ("mask", "sfm", "train"):
                 reviewed(state, "extract")
-            if stage in ("sfm", "train") and s["maskModel"]:
+            if stage in ("sfm", "train") and has_masks(config):
                 reviewed(state, "mask")
             if stage == "train":
                 reviewed(state, "sfm")
-            is_ffmpeg = stage == "extract" and s.get("decoder") == "ffmpeg"
+            is_ffmpeg = (stage == "extract" and s.get("decoder") == "ffmpeg") or (stage == "mask" and bool(config.get("maskSource")))
             executable = tool(s["ffmpeg"] if is_ffmpeg else s["spirula"])
             version = capture([executable, *(["-version"] if is_ffmpeg else ["sfm", "--version"])]).strip()
             if not is_ffmpeg and SPIRULA_VERSION not in version:
@@ -483,7 +505,10 @@ def run(job, stage):
                 raise CaptureError("実行ファイルが変更されています。新規ジョブを作成してください。")
             state[engine_key] = binary
             output.mkdir()
-            if is_ffmpeg:
+            if config.get("schemaVersion") == 2:
+                from .collection import prepare
+                prepare(config, stage, output)
+            elif is_ffmpeg:
                 for cam in ("cam0", "cam1"):
                     (output / "images" / cam).mkdir(parents=True)
             argv_list = commands(config, state, stage, output)

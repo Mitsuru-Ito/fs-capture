@@ -48,9 +48,15 @@ class ReviewTests(unittest.TestCase):
 
     def test_corrupt_sfm_cannot_be_approved(self):
         output = self.stage('sfm')
-        (output / 'sparse/0/cameras.bin').write_bytes(b'broken')
-        with self.assertRaises(c.CaptureError):
-            c.review(self.job, 'sfm', True, 'must reject')
+        for name in ('cameras.bin', 'images.bin', 'points3D.bin'):
+            with self.subTest(file=name):
+                path = output / 'sparse/0' / name
+                original = path.read_bytes()
+                path.write_bytes(b'broken')
+                with self.assertRaises(c.CaptureError):
+                    c.review(self.job, 'sfm', True, 'must reject')
+                self.assertIn('error', c.read(self.job / 'state.json')['reviews']['sfm'])
+                path.write_bytes(original)
 
     def test_valid_changed_file_cannot_be_approved(self):
         state = self.extract()

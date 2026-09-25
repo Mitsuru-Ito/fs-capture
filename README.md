@@ -15,6 +15,18 @@ DJI Osmo 360のオリジナルOSVから静的な3D Gaussian Splattingを生成�
 
 GPU要件を満たせない場合は処理を失敗として記録します。パッケージ、モデル、実行ファイルを自動ダウンロードしません。元動画は移動・上書きせず参照し、SHA-256を保存します。別途バックアップしてください。
 
+## 複数の撮影素材を処理する
+
+`init-manifest`で複数OSVを一つのジョブへ登録できます。固定撮影は各素材1時刻、移動撮影は採用フレームまたは区間を指定します。手修正マスクの取り込み、画像・マスクの寸法と可読性検査、内部HTMLレポート、撮影箇所の確認記録に対応しています。
+
+```sh
+python3 -m fs_capture init-manifest input/manifest.json work/room-02 --spirula /path/to/spirula
+python3 -m fs_capture run work/room-02 extract
+python3 -m fs_capture report work/room-02
+```
+
+[manifest例](examples/fixed-captures.json)と[複数OSVの標準手順](docs/multi-capture.md)を参照してください。元動画・マスク・生成データは付属しません。既存の単一OSVコマンドは引き続き利用できます。
+
 ## 段階別の診断
 
 ```sh
@@ -59,7 +71,7 @@ python3 -m fs_capture run work/room-mac extract
 
 2026-09-24のM3 Max実素材試験では、3840×3840・25fps・10.28秒の2トラックOSVから33時刻・66枚の画像を抽出できました。これはデコード・抽出の成功であり、3D復元の成功ではありません。人物を含む素材やほぼ固定撮影の素材は、マスクと撮影位置の検証が別途必要です。
 
-同日、同一空間に見える5本から各1時刻・両魚眼を取り出した別診断では、10枚すべてが1モデルへ登録されました。単一動画CLIとは別の試行です。詳しくは[実素材検証の結果](docs/real-capture-check.md)を参照してください。
+同日、同一空間に見える5本から各1時刻・両魚眼を取り出した別診断では、10枚すべてが1モデルへ登録されました。当時は単一動画CLIとは別の手動試行でした。複数素材の標準経路は現在`init-manifest`で利用できます。詳しくは[実素材検証の結果](docs/real-capture-check.md)を参照してください。
 
 `--fps`は目標値です。元動画fpsから整数間隔を計算するため、例えば29.97fpsを10フレームごとに抽出すると2.997fpsになります。現在は一定間隔・同期抽出です。ブレと重複を選別する適応抽出は後続課題です。
 
