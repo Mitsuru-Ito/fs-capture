@@ -57,7 +57,7 @@ def capture_check(job, label, status, note, reviewer, references=None, field_obs
         entry['referencePhotos'] = photos
         entry.pop('fieldObservation', None)
         if field_observation is not None:
-            entry['fieldObservation'] = dict(field_observation, planSha256=c.digest(root/'field-plan.json'))
+            entry['fieldObservation'] = dict(field_observation, targetId=next(x['id'] for x in plan['items'] if x['label']==label), planSha256=c.digest(root/'field-plan.json'))
         # Tie this human observation to the verified config and available output snapshots.
         entry['configSha256'] = state['configSha256']
         entry['artifacts'] = artifacts

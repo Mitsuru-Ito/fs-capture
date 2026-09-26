@@ -14,16 +14,31 @@
 
 以下はパス・案件名を置き換える操作例であり、実撮影を実施した記録ではない。
 
+まず、動画・GPU・ジョブがない段階で計画を作る。`--target`と`--need`は同じ順番で対応する。必要情報と合格条件は現場責任者が決め、例文を確認済み要件として使わない。
+
+```sh
+python3 -m fs_capture field-plan work/room-before --before-capture \
+  --case pilot-01 --site room-01 --equipment equipment-01 \
+  --purpose '設備の位置と周辺形状の理解' --date 2026-09-26 --revision v1 \
+  --reviewer 計画担当者 \
+  --target 入口 --need '入口から対象設備までの位置関係が分かる' \
+  --target 設備正面 --need '対象設備と周辺の配管を区別できる'
+python3 -m fs_capture field-report work/room-before
+```
+
+`work/room-before/field-plan.html`をローカルで開き、必要ならブラウザから印刷する。撮影予定日と実際の撮影日は別。原案は作成時ハッシュで固定し、後から項目を減らして合格扱いにしない。計画を変更する場合は別フォルダ・別版として原案を残す。初版では版間の自動統合は行わない。
+
+撮影後、実在する素材からジョブを初期化し、**処理開始前に**計画を関連付ける。
+
 ```sh
 python3 -m fs_capture capture-manifest work/room-manifest.json \
   --source /path/to/moving.OSV --seconds 60 --sample-fps 1 \
   --evaluation-source /path/to/independent-reference.jpg \
   --target 入口 --target 設備正面 --target 周辺配置 --target 背面 --target 特徴点
 python3 -m fs_capture init-manifest work/room-manifest.json work/room-pilot --spirula /path/to/spirula
-python3 -m fs_capture field-plan work/room-pilot \
+python3 -m fs_capture field-link work/room-before work/room-pilot \
   --case pilot-01 --site room-01 --equipment equipment-01 \
-  --purpose '設備の位置と周辺形状の理解' --date 2026-09-26 --revision v1 \
-  --reviewer 担当者 --target 入口 --target 設備正面 --target 周辺配置 --target 背面 --target 特徴点
+  --reviewer 担当者 --note '撮影素材が計画した案件・現場・設備のものと確認した'
 python3 -m fs_capture preflight work/room-pilot --stage extract
 python3 -m fs_capture run work/room-pilot extract
 python3 -m fs_capture report work/room-pilot
@@ -32,7 +47,13 @@ python3 -m fs_capture field-check work/room-pilot 設備正面 \
   --visibility OBSERVED --reviewer 担当者 --note '採用画像を確認。文字は別写真で確認する'
 ```
 
+関連付けは当初のtargetId・必要情報・履歴を独立スナップショットとして保持する。案件・現場・設備の不一致、処理済みジョブ、既存計画への上書きは拒否する。素材だけから案件を自動識別できるわけではなく、入力した識別情報と実素材の一致は担当者が確認する。従来の`field-plan JOB`も維持するが、撮影前計画として後付けで扱わない。
+
 `field-plan.html`は印刷できる内部確認表。画像レポートからも参照できる。`--capture`はその素材・レンズの採用画像**全体**を根拠に指定するため、未確認の画像まで確認済みとしない。個別指定は従来の`--reference extract:images/...`を使う。別撮り根拠写真は`--photo /path/to/detail.jpg`で登録し、可読性とハッシュを記録する。内部用の根拠写真は公開承認を意味しない。
+
+引継ぎ前に`field-report JOB`を実行する（抽出後の`report JOB`でも更新）。根拠の存在・ハッシュを再照合し、**根拠有効／消失／変更／未再確認**を当時の撮影・公開確認とは別に示す。有効件数には現在の根拠を照合できた撮影済み対象だけを数える。差し替え・消失しても過去QAは変更しない。資料を復元して再生成するか、新資料を新しい観測として確認する。
+
+有効な登録画像にだけ相対リンクを出す。新しい任意ファイル配信サーバや画像の自動コピーは作らないため、同じPCで元の配置を保って開く内部資料であり、HTMLだけを別PCへ送っても根拠は移らない。状態は再生成時点のもので、開いたままの画面が自動で再検証するわけではない。写真・対象の確認をモデル全体の納品承認へ拡大しない。
 
 撮影状態はCAPTURED／NOT_CAPTURED／OCCLUDED／NEEDS_CAPTURE／NOT_TESTED。CAPTUREDには存在する根拠が必要。可視性はUNOBSERVED（未観測）、OCCLUDED（遮蔽）、PRIVACY_HIDDEN（公開上の非表示）、RECONSTRUCTION_UNCERTAIN（復元不確か）、OBSERVED（観測）を区別する。公開状態はNOT_TESTED／RESTRICTED／APPROVEDで、対象写真・箇所に対する担当者の確認だけを表し、モデル全体の納品許可ではない。見えないことを「存在しない」「安全」「異常なし」と解釈しない。
 
@@ -68,3 +89,18 @@ python3 -m fs_capture field-log work/room-pilot --activity 学習 \
 顧客側の年間時間便益は利用回数×短縮時間×時間単価。重複しない実証便益を加え、更新・運用費を差し引く。正の純便益の場合のみ初期費用÷年間純便益で単純回収年数を計算する。空いた時間と実際の支出削減は別。提供側は売上−撮影・出張・制作・修正・再撮影・計算・ライセンス・支援の原価を集計し、初回構築と反復提供を分ける。未計測値は空欄とし、本実装は価格・需要・ROIを生成しない。
 
 次へ進む条件は、人の用途確認、正確さを落とさない業務改善、開発者の常時介入なしの運用、総費用を上回る再利用便益。数値閾値は利用者・決裁者と事前に定める。成立しなければ撮影・マスク・投影等を切り分け、360資料の代替も検討する。顧客の合意なく3D契約を別形式へ変更しない。内部プレビューの顧客配布は行わない。
+
+## 決裁用の1ページ記録（未計測は空欄／未確認）
+
+| 判断材料 | 実測・根拠／仮定・未確認 |
+| --- | --- |
+| 対象案件・現場・設備・版・用途／利用不可の範囲 | 未確認 |
+| 必須箇所と人による判定・確認者・日付／未確認箇所 | 未確認 |
+| 現行資料・写真／360・3Dの正答、誤認、時間、支援回数 | 未計測 |
+| 撮影・許可・出張・選別・マスク・検査・手直し・再撮影・支援の実働 | 未計測 |
+| コピー・検査・学習など機械待ち（実働と別） | 未計測 |
+| 初回制作／反復制作・更新の原価、費用の重複有無 | 未計測 |
+| 顧客が確認した年間利用・更新頻度、保存・配信要件、運用責任者 | 未確認 |
+| 継続／条件変更／中止、理由、次の実証予算上限・期限 | 未決定 |
+
+既存のQA、field-log、task-observations.csvを根拠に記入する。空欄をゼロとしない。完成3Dの品質保証付き納品と、未達条件を明示した検証委託は区別する。最終評価素材を調整に見た場合は探索的な結果と明記し、新しい独立評価素材の要否を判断する。

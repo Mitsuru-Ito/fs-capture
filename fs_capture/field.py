@@ -4,6 +4,8 @@ import datetime
 import html
 import json
 import math
+import os
+from urllib.parse import quote
 from pathlib import Path
 import shutil
 import time
@@ -45,6 +47,14 @@ def load_plan(root, config, state):
     plan = c.read(path)
     if plan['configSha256'] != state['configSha256']:
         raise c.CaptureError('Field plan belongs to a different configuration')
+    if plan.get('kind') == 'job-linked':
+        origin = plan['origin']
+        snapshot = root/'capture-plan-source.json'
+        if origin.get('snapshot') != snapshot.name or c.digest(snapshot) != origin['sha256']:
+            raise c.CaptureError('当初の撮影計画スナップショットが変更されています。')
+        original = c.read(snapshot)
+        if plan['items'] != original['items'] or plan['metadata'] != original['metadata'] or plan['planId'] != original['planId']:
+            raise c.CaptureError('当初の対象・合格条件・案件を変更できません。')
     verify_evaluation(config, plan['evaluation'])
     return plan
 
@@ -179,28 +189,70 @@ def evidence_for(root, entry, state):
 
 
 def render(root, plan):
+    root = Path(root)
     checks = c.read(root/'capture-qa.json')['items'] if (root/'capture-qa.json').exists() else []
     by_label = {x['label']: x for x in checks}
-    rows, observations = [], []
     state = c.read(root/'state.json') if (root/'state.json').exists() else {}
+    labels = {'CAPTURED':'撮影済み（当時の記録）','NOT_CAPTURED':'未撮影','OCCLUDED':'遮蔽あり',
+              'NEEDS_CAPTURE':'追加撮影が必要','NOT_TESTED':'未確認','UNOBSERVED':'未観測',
+              'PRIVACY_HIDDEN':'公開上の理由で非表示','RECONSTRUCTION_UNCERTAIN':'復元が不確か',
+              'OBSERVED':'観測済み','APPROVED':'個別資料の公開確認済み（当時）','RESTRICTED':'公開制限あり',
+              'VALID':'根拠有効','MISSING':'根拠消失','CHANGED':'根拠変更','UNVERIFIED':'未再確認／照合不能'}
+    actions = {'VALID':'再生成時点でハッシュ一致。内容の用途判定は別です。',
+               'MISSING':'資料の所在を確認・復元し、確認表を再生成してください。',
+               'CHANGED':'差し替えた資料を確認し、新しい観測として記録してください。',
+               'UNVERIFIED':'根拠資料・登録時ハッシュ・参照先を確認してください。'}
+    esc = html.escape
+    rows, observations = [], []
     for item in plan['items']:
         entry = by_label.get(item['label'], {})
         evidence = evidence_for(root, entry, state)
-        observations.append(dict(targetId=item['id'], label=item['label'], historicalStatus=entry.get('status','NOT_TESTED'), **evidence))
-        cells = [item['id'], item['label'], entry.get('status', 'NOT_TESTED'), entry.get('fieldObservation', {}).get('visibility', item['visibility']), entry.get('fieldObservation', {}).get('publication', item['publication']), entry.get('note', ''), ', '.join(entry.get('references', {}).get('files', [])), evidence['evidenceStatus']]
-        rows.append('<tr>'+''.join('<td>'+html.escape(str(x))+'</td>' for x in cells)+'</tr>')
-    metadata = html.escape(json.dumps(plan['metadata'], ensure_ascii=False))
-    text = '<!doctype html><meta charset="utf-8"><title>FS Capture 撮影確認表</title><style>body{font-family:system-ui;margin:2em}td,th{padding:.6em;border:1px solid #ccc}table{border-collapse:collapse}</style><h1>内部用 撮影確認表</h1>'
-    text += '<p>安全な待機場所で確認してください。立入許可・現場の安全手順を代替しません。撮影済みは画質合格・公開承認ではありません。</p><p>'+metadata+'</p>'
-    text += '<table><tr><th>ID</th><th>対象</th><th>撮影状況</th><th>見えない理由／観測</th><th>公開確認</th><th>理由</th><th>根拠</th><th>現在の有効性</th></tr>'+''.join(rows)+'</table>'
-    text += '<p>UNOBSERVED＝未観測 / OCCLUDED＝遮蔽 / PRIVACY_HIDDEN＝公開上の非表示 / RECONSTRUCTION_UNCERTAIN＝復元が不確か / OBSERVED＝観測（十分な品質の保証ではありません）。</p>'
-    current = {'schemaVersion': 1, 'checkedAt': time.time(), 'items': observations,
-               'validCapturedCount': sum(x['historicalStatus'] == 'CAPTURED' and x['evidenceStatus'] == 'VALID' for x in observations)}
-    text += '<p>現在の根拠有効性：VALID＝照合済み、MISSING＝消失（所在を確認）、CHANGED＝変更（再確認が必要）、UNVERIFIED＝照合不能（根拠・ハッシュを確認）。過去の撮影・公開確認を変更する判定ではありません。</p>'
-    text += f'<p>現在の根拠が有効な撮影済み対象：{current["validCapturedCount"]}。個別写真の公開確認はモデル全体の公開・納品承認ではありません。</p>'
-    c.write(root/'field-evidence.json', current)
-    (root/'field-plan.html').write_text(text, encoding='utf-8')
+        status = entry.get('status', 'NOT_CAPTURED' if plan.get('kind') == 'pre-capture' else 'NOT_TESTED')
+        observations.append(dict(targetId=item['id'], label=item['label'], historicalStatus=status, **evidence))
+        links = []
+        for index, file in enumerate(evidence['files'], 1):
+            label = f'根拠 {index}'
+            if file['status'] == 'VALID' and evidence['evidenceStatus'] == 'VALID' and file['path'] and Path(file['path']).suffix.lower() in ('.jpg','.jpeg','.png'):
+                relative = quote(os.path.relpath(file['path'], root), safe='/')
+                links.append(f'<li><a href="{esc(relative)}" target="_blank" rel="noopener">{label}の画像を開く</a></li>')
+            else:
+                links.append(f'<li>{label}：{labels[file["status"]]}（画像リンクなし）</li>')
+        observation = entry.get('fieldObservation', {})
+        visibility = observation.get('visibility', item['visibility'])
+        publication = observation.get('publication', item['publication'])
+        at = entry.get('at')
+        stamp = datetime.datetime.fromtimestamp(at, datetime.timezone.utc).isoformat() if isinstance(at,(int,float)) else '未記録'
+        details = esc(json.dumps({'targetId':item['id'],'status':status,'publication':publication,'references':evidence['files']},ensure_ascii=False))
+        rows.append(f'<tr><td><strong>{esc(item["label"])}</strong><p>{esc(item.get("requirement","合格条件は未登録"))}</p></td>'
+                    f'<td>{labels.get(status,esc(status))}<p>{esc(entry.get("reviewer","担当未記録"))}<br>{esc(stamp)}</p></td>'
+                    f'<td><strong>{labels[evidence["evidenceStatus"]]}</strong><p>{actions[evidence["evidenceStatus"]]}</p><ul>{"".join(links)}</ul>'
+                    f'<details><summary>資料名・パス・識別情報</summary><code>{details}</code></details></td>'
+                    f'<td>{labels.get(visibility,esc(visibility))}<p>{esc(entry.get("note",""))}</p></td>'
+                    f'<td>{labels.get(publication,esc(publication))}</td></tr>')
+    current = {'schemaVersion':1,'checkedAt':time.time(),'items':observations,
+               'validCapturedCount':sum(x['historicalStatus']=='CAPTURED' and x['evidenceStatus']=='VALID' for x in observations)}
+    metadata_names = {'caseId':'案件','siteId':'現場','equipmentId':'設備','purpose':'用途','captureDate':'撮影日（申告）',
+                      'plannedCaptureDate':'撮影予定日','revision':'版','reviewer':'計画担当者'}
+    metadata = ' ／ '.join(f'{metadata_names.get(k,k)}：{esc(str(v))}' for k,v in plan['metadata'].items())
+    title = '撮影前の確認計画' if plan.get('kind')=='pre-capture' else '撮影・根拠の確認表'
+    text = '<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+    text += f'<title>FS Capture {title}</title><style>body{{font-family:system-ui;margin:2em;color:#18312e}}td,th{{padding:.8em;border:1px solid #ccc;vertical-align:top}}table{{border-collapse:collapse;width:100%}}code{{overflow-wrap:anywhere}}p{{line-height:1.5}}.notice{{background:#fff1d4;padding:1em}}@media print{{details{{display:none}}body{{margin:0;font-size:10pt}}a{{color:inherit}}}}</style>'
+    text += f'<h1>{title}</h1><p>{metadata}</p><p class="notice">内部確認用。安全な待機場所で確認してください。立入許可・現場の安全手順を代替しません。撮影済みは用途合格ではなく、個別写真の公開確認はモデル全体の公開・納品承認ではありません。</p>'
+    stamp = datetime.datetime.fromtimestamp(current['checkedAt'],datetime.timezone.utc).isoformat()
+    text += f'<p>再照合：{stamp} ／ 現在の根拠が有効な撮影済み対象：{current["validCapturedCount"]} / {len(observations)}。過去の判断を上書きせず、根拠不明の対象は有効件数に含めません。</p>'
+    text += '<table><tr><th>対象・必要な情報／合格条件</th><th>過去の撮影記録・確認者</th><th>現在の根拠・次の操作</th><th>見えない理由・撮影メモ</th><th>当時の個別公開確認</th></tr>'+''.join(rows)+'</table>'
+    text += '<p>この表示は再生成時点の照合結果です。資料変更後は field-report または report で再生成してください。未観測・遮蔽・非表示・復元不確かは「存在しない」「安全」を意味しません。画像は登録された根拠への相対リンクで開き、任意ファイルを配信するサーバは追加しません。</p></html>'
+    c.write(root/'field-evidence.json',current)
+    (root/'field-plan.html').write_text(text,encoding='utf-8')
     return current
+
+
+def write_task_template(root):
+    path = root/'task-observations.csv'
+    if path.exists():
+        return
+    with path.open('x',encoding='utf-8',newline='') as stream:
+        csv.writer(stream).writerow(['participantId','order','condition','equipment','task','correct','misidentification','unknownHandling','seconds','assistanceCount','failureReason','reviewer'])
 
 
 def create_plan(job, case, site, equipment, purpose, date, revision, reviewer, targets):
@@ -219,8 +271,7 @@ def create_plan(job, case, site, equipment, purpose, date, revision, reviewer, t
                 'items': [{'id': str(i+1), 'label': label, 'visibility': 'UNOBSERVED', 'publication': 'NOT_TESTED', 'references': []} for i,label in enumerate(targets)],
                 'evaluation': [], 'history': [], 'createdAt': time.time()}
         c.write(root/'field-plan.json', plan); render(root, plan)
-        with (root/'task-observations.csv').open('x', encoding='utf-8', newline='') as stream:
-            csv.writer(stream).writerow(['participantId','order','condition','equipment','task','correct','misidentification','unknownHandling','seconds','assistanceCount','failureReason','reviewer'])
+        write_task_template(root)
     return plan
 
 

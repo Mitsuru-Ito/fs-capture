@@ -26,7 +26,15 @@ def main(argv=None):
     dm.add_argument('--target', action='append', default=[])
     dm.add_argument('--evaluation-source', action='append', default=[])
     fp = sub.add_parser('field-plan', help='既存ジョブに撮影計画と印刷用確認表を作成')
-    fp.add_argument('job')
+    fp.add_argument('job', help='既存ジョブ、または --before-capture の新規計画フォルダ')
+    fp.add_argument('--before-capture', action='store_true', help='動画なしで当初の撮影計画を作成')
+    fp.add_argument('--need', action='append', default=[], help='各 --target に対応する必要情報・合格条件（同じ順で指定）')
+    fr = sub.add_parser('field-report', help='根拠を再照合して確認表を再生成（抽出前も利用可）')
+    fr.add_argument('folder')
+    fl = sub.add_parser('field-link', help='撮影前計画を処理前の新規ジョブへ明示的に関連付け')
+    fl.add_argument('plan'); fl.add_argument('job')
+    for key in ('case','site','equipment','reviewer','note'):
+        fl.add_argument('--'+key, required=True)
     for key in ('case', 'site', 'equipment', 'purpose', 'date', 'revision', 'reviewer'):
         fp.add_argument('--'+key, required=True)
     fp.add_argument('--target', action='append', required=True, help='設備名・確認箇所名（繰り返し可）')
@@ -129,8 +137,20 @@ def main(argv=None):
             from .field import draft_manifest
             result = draft_manifest(args.output, args.source, args.sample_fps, args.seconds, args.target, args.evaluation_source)
         elif args.action == 'field-plan':
-            from .field import create_plan
-            result = create_plan(args.job, args.case, args.site, args.equipment, args.purpose, args.date, args.revision, args.reviewer, args.target)
+            if args.before_capture:
+                from .field_plan import create_before
+                result = create_before(args.job,args.case,args.site,args.equipment,args.purpose,args.date,args.revision,args.reviewer,args.target,args.need)
+            else:
+                if args.need:
+                    raise CaptureError('--needは撮影前計画で指定してください。')
+                from .field import create_plan
+                result = create_plan(args.job, args.case, args.site, args.equipment, args.purpose, args.date, args.revision, args.reviewer, args.target)
+        elif args.action == 'field-report':
+            from .field_plan import report as field_report
+            result = field_report(args.folder)
+        elif args.action == 'field-link':
+            from .field_plan import link
+            result = link(args.plan,args.job,args.case,args.site,args.equipment,args.reviewer,args.note)
         elif args.action == 'field-check':
             from .field import check, capture_references
             args.reference += ['photo:'+str(Path(x).resolve()) for x in args.photo]

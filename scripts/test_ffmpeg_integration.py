@@ -13,6 +13,7 @@ names = [
     'test_collection.CollectionTests',
     'test_derive.DeriveCollectionTests',
     'test_field_media.FieldMediaTests',
+    'test_field_evidence.EvidenceCliTests',
 ]
 suite = unittest.defaultTestLoader.loadTestsFromNames(names)
 expected = suite.countTestCases()
