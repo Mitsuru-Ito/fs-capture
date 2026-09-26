@@ -15,6 +15,44 @@ from .report import report, capture_check
 def main(argv=None):
     parser = argparse.ArgumentParser(description="FS Capture: Osmo 360実素材の段階的な3DGS検証")
     sub = parser.add_subparsers(dest="action", required=True)
+    wl = sub.add_parser('field-log', help='作業者が実働／機械待ち時間を明示記録する')
+    wl.add_argument('job'); wl.add_argument('--activity', required=True)
+    wl.add_argument('--kind', choices=('human-active','machine-wait'), required=True)
+    wl.add_argument('--minutes', type=float, required=True)
+    wl.add_argument('--operator', required=True); wl.add_argument('--note', required=True)
+    dm = sub.add_parser('capture-manifest', help='秒数と採用fpsから移動撮影manifestの下書きを作成（処理しない）')
+    dm.add_argument('output'); dm.add_argument('--source', action='append', required=True)
+    dm.add_argument('--sample-fps', type=float, default=1); dm.add_argument('--seconds', type=float, default=60)
+    dm.add_argument('--target', action='append', default=[])
+    dm.add_argument('--evaluation-source', action='append', default=[])
+    fp = sub.add_parser('field-plan', help='既存ジョブに撮影計画と印刷用確認表を作成')
+    fp.add_argument('job')
+    for key in ('case', 'site', 'equipment', 'purpose', 'date', 'revision', 'reviewer'):
+        fp.add_argument('--'+key, required=True)
+    fp.add_argument('--target', action='append', required=True, help='設備名・確認箇所名（繰り返し可）')
+    fc = sub.add_parser('field-check', help='必須確認箇所と根拠・非表示理由を記録')
+    fc.add_argument('job'); fc.add_argument('label')
+    from .field import STATUSES, VISIBILITY
+    fc.add_argument('--status', choices=STATUSES, required=True)
+    fc.add_argument('--note', required=True); fc.add_argument('--reviewer', required=True)
+    fc.add_argument('--reference', action='append', default=[])
+    fc.add_argument('--photo', action='append', default=[], help='別撮りの根拠写真（内部確認用）')
+    fc.add_argument('--capture', help='指定captureの採用画像全体を参照する')
+    fc.add_argument('--lens', choices=('cam0','cam1'), help='capture内のレンズを限定')
+    fc.add_argument('--visibility', choices=VISIBILITY, default='UNOBSERVED')
+    fc.add_argument('--publication', choices=('NOT_TESTED','RESTRICTED','APPROVED'), default='NOT_TESTED')
+    fe = sub.add_parser('field-evaluation', help='独立した評価専用素材を登録（学習に渡さない）')
+    fe.add_argument('job'); fe.add_argument('source')
+    pf = sub.add_parser('preflight', help='処理量・候補ペア数・コピー・空き容量の診断')
+    pf.add_argument('job'); pf.add_argument('--stage', choices=STAGES, default='sfm')
+    pf.add_argument('--copy-upstream', action='store_true', help='同じファイルシステムへのtrain-only派生のコピー量を診断')
+    budget = sub.add_parser('budget', help='理由付きの実行予算を記録')
+    budget.add_argument('job')
+    budget.add_argument('--max-images', type=int, required=True)
+    budget.add_argument('--max-pairs', type=int, required=True)
+    budget.add_argument('--min-free-bytes', type=int, required=True)
+    budget.add_argument('--reason', required=True)
+    budget.add_argument('--allow-unknown-extraction', action='store_true', help='枚数不明の単一動画の抽出だけを理由付きで許可。SfM/学習には適用しない')
     doctor = sub.add_parser("doctor", help="導入・入力・デコード・GPU・既存学習記録を分けて診断")
     doctor.add_argument("--spirula", default="spirula")
     doctor.add_argument("--ffprobe", default="ffprobe")
@@ -84,12 +122,38 @@ def main(argv=None):
     check.add_argument("--note", required=True)
     args = parser.parse_args(argv)
     try:
-        if args.action == "doctor":
+        if args.action == 'field-log':
+            from .field import log_work
+            result = log_work(args.job,args.activity,args.kind,args.minutes,args.operator,args.note)
+        elif args.action == 'capture-manifest':
+            from .field import draft_manifest
+            result = draft_manifest(args.output, args.source, args.sample_fps, args.seconds, args.target, args.evaluation_source)
+        elif args.action == 'field-plan':
+            from .field import create_plan
+            result = create_plan(args.job, args.case, args.site, args.equipment, args.purpose, args.date, args.revision, args.reviewer, args.target)
+        elif args.action == 'field-check':
+            from .field import check, capture_references
+            args.reference += ['photo:'+str(Path(x).resolve()) for x in args.photo]
+            if args.lens and not args.capture:
+                raise CaptureError('--lens requires --capture')
+            if args.capture:
+                args.reference += capture_references(args.job, args.capture, args.lens)
+            result = check(args.job, args.label, args.status, args.note, args.reviewer, args.reference, args.visibility, args.publication)
+        elif args.action == 'field-evaluation':
+            from .field import add_evaluation
+            result = add_evaluation(args.job, args.source)
+        elif args.action == 'preflight':
+            from .field import preflight
+            result = preflight(args.job, args.stage, args.copy_upstream)
+        elif args.action == 'budget':
+            from .field import set_budget
+            result = set_budget(args.job, args.max_images, args.max_pairs, args.min_free_bytes, args.reason, args.allow_unknown_extraction)
+        elif args.action == "doctor":
             result, code = diagnose(args.spirula, args.ffprobe, args.ffmpeg, args.decoder,
                                     args.source, args.check_gpu, args.job)
             print(json.dumps(result, ensure_ascii=False, indent=2))
             return code
-        if args.action in ("preview", "preview-serve", "preview-import"):
+        elif args.action in ("preview", "preview-serve", "preview-import"):
             from .preview import prepare, serve, import_review
             if args.action == "preview-import":
                 result = import_review(args.preview, args.record)

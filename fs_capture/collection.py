@@ -58,6 +58,8 @@ def create_manifest(manifest, job, spirula='spirula', ffprobe='ffprobe', ffmpeg=
     for item in data['captures']:
         if not isinstance(item, dict) or not isinstance(item.get('source'), str) or not isinstance(item.get('captureId'), str):
             raise c.CaptureError('各captureにcaptureIdとsourceの文字列が必要です。')
+        if item.get('role', 'training') != 'training':
+            raise c.CaptureError('Evaluation material cannot be a training capture')
         cid = item['captureId']
         if not isinstance(cid, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}', cid) or cid.casefold() in ids:
             raise c.CaptureError('captureIdは一意な英数字・_・-で指定してください（大文字小文字も区別しません）。')
@@ -97,6 +99,14 @@ def create_manifest(manifest, job, spirula='spirula', ffprobe='ffprobe', ffmpeg=
                 'imageWidth': width, 'imageHeight': height}
     config = {'schemaVersion': 2, 'createdAt': time.time(), 'captures': captures, 'settings': settings,
               'manifestSha256': c.digest(manifest), 'maskSource': None}
+    from .field import verify_evaluation
+    evaluation = []
+    for name in data.get('evaluationSources', []):
+        path = (manifest.parent / name).resolve()
+        evaluation.append({'path': str(path), 'sha256': c.digest(path), 'role': 'evaluation-only'})
+    verify_evaluation(config, evaluation)
+    if evaluation:
+        config['evaluationSources'] = evaluation
     masking = data.get('masking')
     if masking is not None:
         if not isinstance(masking, dict) or not isinstance(masking.get('root'), str):

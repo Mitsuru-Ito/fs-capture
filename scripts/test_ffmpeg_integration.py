@@ -12,6 +12,7 @@ names = [
     'test_diagnostics.DecodeIntegrationTests.test_actual_two_track_first_frame_decode',
     'test_collection.CollectionTests',
     'test_derive.DeriveCollectionTests',
+    'test_field_media.FieldMediaTests',
 ]
 suite = unittest.defaultTestLoader.loadTestsFromNames(names)
 expected = suite.countTestCases()

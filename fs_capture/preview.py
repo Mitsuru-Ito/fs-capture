@@ -291,6 +291,22 @@ def check_png(raw, projection):
         raise c.CaptureError('Invalid screenshot compression') from exc
 
 
+def review_identity(record):
+    """v1 canonical JSON content, including time, reviewer, candidate and PNG.
+
+    Export attempts may differ; the observation describes a new confirmation.
+    Legacy schema 1/2 use the entire unchanged content as their retry key.
+    """
+    observation, export = record.get('observationId'), record.get('exportId')
+    if (observation is None) != (export is None):
+        raise c.CaptureError('Both observationId and exportId are required')
+    if observation is not None and any(not isinstance(x, str) or not x.strip() or len(x) > 128 for x in (observation, export)):
+        raise c.CaptureError('Invalid observation/export identity')
+    payload = {k: v for k, v in record.items() if k != 'exportId'}
+    return {'rule': 'canonical-json-v1', 'observationId': observation, 'exportId': export,
+            'payloadSha256': object_hash(payload)}
+
+
 def import_review(folder, source):
     folder = Path(folder).resolve()
     with c.locked(folder):
@@ -299,6 +315,9 @@ def import_review(folder, source):
             raise c.CaptureError('Review file too large')
         record = c.read(Path(source))
         validate_record(record, bundle, c.read(folder/'cameras.json'), c.read(folder/'scene.json'))
+        if any(k in record for k in ('id','importedAt','evidence','evidenceSha256','context','importIdentity','exportAliases')):
+            raise c.CaptureError('Import expects an export, not an already imported record')
+        identity = review_identity(record)
         png = record.pop('screenshot', '')
         if not png.startswith('data:image/png;base64,'):
             raise c.CaptureError('Review screenshot is required')
@@ -307,11 +326,36 @@ def import_review(folder, source):
         except ValueError as exc:
             raise c.CaptureError('Invalid screenshot') from exc
         check_png(raw, c.read(folder/'cameras.json')['projection'])
-        ident = uuid.uuid4().hex
         target = folder/'reviews'
         target.mkdir(exist_ok=True)
+        for path in sorted(target.glob('*.json')):
+            previous = c.read(path)
+            validate_record(previous, bundle, c.read(folder/'cameras.json'), c.read(folder/'scene.json'))
+            # Old records are reconstructed read-only; no historical records are merged.
+            evidence = safe_file(folder, previous['evidence'])
+            if c.digest(evidence) != previous['evidenceSha256']:
+                raise c.CaptureError('Existing review evidence changed')
+            original = {k: v for k, v in previous.items() if k not in
+                        ('id', 'importedAt', 'evidence', 'evidenceSha256', 'context', 'importIdentity', 'exportAliases')}
+            original['screenshot'] = 'data:image/png;base64,' + base64.b64encode(evidence.read_bytes()).decode()
+            prior = review_identity(original)
+            if previous.get('importIdentity', prior) != prior:
+                raise c.CaptureError('Existing review identity changed')
+            shared = identity['observationId'] and identity['observationId'] == prior['observationId']
+            shared_export = identity['exportId'] and identity['exportId'] in [prior['exportId'], *previous.get('exportAliases', [])]
+            if shared or shared_export:
+                if identity['payloadSha256'] != prior['payloadSha256']:
+                    raise c.CaptureError('Review identity conflict: content differs')
+            if shared or shared_export or identity == prior:
+                if identity['exportId'] and identity['exportId'] != prior['exportId'] and identity['exportId'] not in previous.get('exportAliases', []):
+                    previous.setdefault('exportAliases', []).append(identity['exportId'])
+                    c.write(path, previous)
+                return {'review': str(path), 'status': previous['status'], 'duplicate': True,
+                        'scope': 'specified view and purpose only'}
+        ident = uuid.uuid4().hex
+        # The JSON is the commit marker, written atomically after the evidence.
         (target/f'{ident}.png').write_bytes(raw)
-        record.update(id=ident, importedAt=time.time(), evidence=f'reviews/{ident}.png',
+        record.update(id=ident, importIdentity=identity, importedAt=time.time(), evidence=f'reviews/{ident}.png',
                       evidenceSha256=hashlib.sha256(raw).hexdigest(), context=c.read(folder/'scene.json'))
         c.write(target/f'{ident}.json', record)
         return {'review': str(target/f'{ident}.json'), 'status': record['status'], 'scope': 'specified view and purpose only'}

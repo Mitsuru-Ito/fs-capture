@@ -483,10 +483,15 @@ def run(job, stage):
         state["status"] = "running"
         write(job / "state.json", state)
         try:
+            phase_started = time.monotonic()
             config = read(job / "job.json")
             if digest(job / "job.json") != state["configSha256"]:
                 raise CaptureError("設定が作成時から変更されています。新規ジョブを作成してください。")
             verify_sources(config)
+            from .field import preflight, enforce
+            record['resourcePreflight'] = preflight(job, stage)
+            write(attempt / 'preflight.json', record['resourcePreflight'])
+            enforce(record['resourcePreflight'], record['resourcePreflight']['budget'])
             s = config["settings"]
             if s["maskModel"] and digest(s["maskModel"]) != s["maskModelSha256"]:
                 raise CaptureError("マスクモデルが作成時から変更されています。")
@@ -517,13 +522,18 @@ def run(job, stage):
             for argv in argv_list:
                 argv[0] = executable
             write(attempt / "commands.json", argv_list)
+            record["timings"] = {"preflightSeconds": time.monotonic() - phase_started}
+            phase_started = time.monotonic()
             record["phase"] = "execute"
             write(job / "state.json", state)
             for i, argv in enumerate(argv_list):
                 execute(argv, attempt / f"{i:02d}.log")
+            record["timings"]["executionSeconds"] = time.monotonic() - phase_started
+            phase_started = time.monotonic()
             record["phase"] = "validate"
             record["validation"] = validate(stage, output, config, state)
             record["artifacts"] = fingerprint(output)
+            record["timings"]["validationAndHashSeconds"] = time.monotonic() - phase_started
             record["status"] = "succeeded"
             record["phase"] = "complete"
             state["status"] = "awaiting_review"

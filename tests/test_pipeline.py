@@ -13,7 +13,7 @@ from fs_capture import core as c
 
 def metadata():
     stream = {"codec_type": "video", "width": 4000, "height": 4000,
-              "avg_frame_rate": "30/1", "r_frame_rate": "30/1"}
+              "avg_frame_rate": "30/1", "r_frame_rate": "30/1", "nb_frames": "30"}
     return {"streams": [dict(stream), dict(stream),
                         {"codec_type": "video", "disposition": {"attached_pic": 1}}]}
 
