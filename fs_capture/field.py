@@ -138,20 +138,69 @@ def set_budget(job, max_images, max_pairs, min_free_bytes, reason, allow_unknown
     return policy
 
 
+def evidence_for(root, entry, state):
+    """Current evidence availability is separate from the historical observation."""
+    files = []
+    photos = {x.get('path'): x for x in entry.get('referencePhotos', [])}
+    for reference in entry.get('references', {}).get('files', []):
+        stage, separator, name = reference.partition(':')
+        path, expected = None, None
+        if stage == 'photo':
+            photo = photos.get(name, {})
+            if name and Path(name).is_absolute():
+                path, expected = Path(name), photo.get('sha256')
+        elif separator and stage in c.STAGES:
+            record = state.get('stages', {}).get(stage, {})
+            if record.get('status') == 'succeeded' and record.get('output'):
+                output = Path(record['output']).resolve()
+                candidate = (output / name).resolve()
+                if not Path(name).is_absolute() and candidate.is_relative_to(output):
+                    path = candidate
+                    expected = entry.get('artifacts', {}).get(stage, {}).get(name)
+        status = 'UNVERIFIED'
+        if path is not None:
+            try:
+                if not path.is_file(): status = 'MISSING'
+                elif expected:
+                    status = 'VALID' if c.digest(path) == expected else 'CHANGED'
+            except OSError:
+                status = 'UNVERIFIED'
+        files.append({'reference': reference, 'path': str(path) if path else None,
+                      'expectedSha256': expected, 'status': status})
+    # Old records may contain photos but no corresponding reference list.
+    for path in photos:
+        if 'photo:'+str(path) not in entry.get('references', {}).get('files', []):
+            files.append({'reference': 'photo:'+str(path), 'path': None, 'status': 'UNVERIFIED'})
+    statuses = {x['status'] for x in files}
+    status = next((x for x in ('MISSING', 'CHANGED', 'UNVERIFIED') if x in statuses), 'VALID' if files else 'UNVERIFIED')
+    if entry.get('configSha256') != state.get('configSha256'):
+        status = 'UNVERIFIED'
+    return {'evidenceStatus': status, 'files': files}
+
+
 def render(root, plan):
     checks = c.read(root/'capture-qa.json')['items'] if (root/'capture-qa.json').exists() else []
     by_label = {x['label']: x for x in checks}
-    rows = []
+    rows, observations = [], []
+    state = c.read(root/'state.json') if (root/'state.json').exists() else {}
     for item in plan['items']:
         entry = by_label.get(item['label'], {})
-        cells = [item['id'], item['label'], entry.get('status', 'NOT_TESTED'), entry.get('fieldObservation', {}).get('visibility', item['visibility']), entry.get('fieldObservation', {}).get('publication', item['publication']), entry.get('note', ''), ', '.join(entry.get('references', {}).get('files', []))]
+        evidence = evidence_for(root, entry, state)
+        observations.append(dict(targetId=item['id'], label=item['label'], historicalStatus=entry.get('status','NOT_TESTED'), **evidence))
+        cells = [item['id'], item['label'], entry.get('status', 'NOT_TESTED'), entry.get('fieldObservation', {}).get('visibility', item['visibility']), entry.get('fieldObservation', {}).get('publication', item['publication']), entry.get('note', ''), ', '.join(entry.get('references', {}).get('files', [])), evidence['evidenceStatus']]
         rows.append('<tr>'+''.join('<td>'+html.escape(str(x))+'</td>' for x in cells)+'</tr>')
     metadata = html.escape(json.dumps(plan['metadata'], ensure_ascii=False))
     text = '<!doctype html><meta charset="utf-8"><title>FS Capture 撮影確認表</title><style>body{font-family:system-ui;margin:2em}td,th{padding:.6em;border:1px solid #ccc}table{border-collapse:collapse}</style><h1>内部用 撮影確認表</h1>'
     text += '<p>安全な待機場所で確認してください。立入許可・現場の安全手順を代替しません。撮影済みは画質合格・公開承認ではありません。</p><p>'+metadata+'</p>'
-    text += '<table><tr><th>ID</th><th>対象</th><th>撮影状況</th><th>見えない理由／観測</th><th>公開確認</th><th>理由</th><th>根拠</th></tr>'+''.join(rows)+'</table>'
+    text += '<table><tr><th>ID</th><th>対象</th><th>撮影状況</th><th>見えない理由／観測</th><th>公開確認</th><th>理由</th><th>根拠</th><th>現在の有効性</th></tr>'+''.join(rows)+'</table>'
     text += '<p>UNOBSERVED＝未観測 / OCCLUDED＝遮蔽 / PRIVACY_HIDDEN＝公開上の非表示 / RECONSTRUCTION_UNCERTAIN＝復元が不確か / OBSERVED＝観測（十分な品質の保証ではありません）。</p>'
+    current = {'schemaVersion': 1, 'checkedAt': time.time(), 'items': observations,
+               'validCapturedCount': sum(x['historicalStatus'] == 'CAPTURED' and x['evidenceStatus'] == 'VALID' for x in observations)}
+    text += '<p>現在の根拠有効性：VALID＝照合済み、MISSING＝消失（所在を確認）、CHANGED＝変更（再確認が必要）、UNVERIFIED＝照合不能（根拠・ハッシュを確認）。過去の撮影・公開確認を変更する判定ではありません。</p>'
+    text += f'<p>現在の根拠が有効な撮影済み対象：{current["validCapturedCount"]}。個別写真の公開確認はモデル全体の公開・納品承認ではありません。</p>'
+    c.write(root/'field-evidence.json', current)
     (root/'field-plan.html').write_text(text, encoding='utf-8')
+    return current
 
 
 def create_plan(job, case, site, equipment, purpose, date, revision, reviewer, targets):
@@ -242,6 +291,7 @@ def draft_manifest(output, inputs, sample_fps=1, seconds=60, targets=None, evalu
     # Reject copies as well as equal paths before writing a draft.
     config = {'schemaVersion':2,'captures':[{'source':{'path':x['source'],'sha256':c.digest(x['source'])}} for x in captures]}
     verify_evaluation(config,[{'path':x,'sha256':c.digest(x)} for x in result['evaluationSources']])
+    output.parent.mkdir(parents=True, exist_ok=True)
     c.write(output,result)
     return {'manifest':str(output),'status':'DRAFT','quality':'NOT_TESTED','timeBasis':'CFR frameIndex/sourceFps; approximate, not PTS'}
 

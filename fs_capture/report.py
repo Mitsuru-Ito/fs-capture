@@ -82,6 +82,10 @@ def report(job):
         config, state = c.read(root / 'job.json'), c.read(root / 'state.json')
         if c.digest(root / 'job.json') != state['configSha256']:
             raise c.CaptureError('ジョブ設定が変更されています。')
+        field_evidence = None
+        if (root/'field-plan.json').exists():
+            from .field import load_plan, render
+            field_evidence = render(root, load_plan(root, config, state))
         extracted = checked_output(state, 'extract')
         index = c.read(extracted / 'source-index.json')
         mask = checked_output(state, 'mask') if state['stages'].get('mask', {}).get('status') == 'succeeded' else None
@@ -118,7 +122,8 @@ def report(job):
 <p>除外率: {exclusion} {escaped(warnings)} {mask_link}</p></article>''')
         qa_path = root / 'capture-qa.json'
         qa = c.read(qa_path) if qa_path.exists() else {'items': []}
-        checks = ''.join(f"<tr><td>{escaped(x['label'])}</td><td>{escaped(x.get('status','NOT_TESTED'))}</td><td>{escaped(x.get('reviewer',''))}</td><td>{escaped(x.get('note',''))}</td></tr>" for x in qa['items'])
+        evidence_by_label = {x['label']: x['evidenceStatus'] for x in field_evidence['items']} if field_evidence else {}
+        checks = ''.join(f"<tr><td>{escaped(x['label'])}</td><td>{escaped(x.get('status','NOT_TESTED'))}</td><td>{escaped(x.get('reviewer',''))}</td><td>{escaped(x.get('note',''))}</td><td>{escaped(evidence_by_label.get(x['label'],'UNVERIFIED'))}</td></tr>" for x in qa['items'])
         summary = []
         for cap in config.get('captures', []):
             frames = cap['frames']
@@ -132,7 +137,7 @@ def report(job):
 <h1>{title}</h1><p class="notice">内部確認用・機密画像を含む可能性あり。顧客納品用ではありません。生成成功・撮影済みは画質合格、匿名化、公開承認を意味しません。</p>
 <p>ジョブ設定ハッシュ: <code>{state['configSha256']}</code></p>
 <p>処理状態: {escaped(stage_summary)}</p><h2>撮影範囲</h2><ul>{''.join(summary)}</ul><p>固定撮影の時刻や枚数を独立視点数とみなしません。動画間の同時刻性は仮定せず、未選択区間の網羅性は判定しません。SfMのMISSINGは採用した画像が未登録、NOT_TESTEDはSfM未実施です。</p>
-{field_link}<h2>担当者の確認箇所</h2><table><tr><th>箇所</th><th>状態</th><th>担当者</th><th>理由</th></tr>{checks}</table>
+{field_link}<h2>担当者の確認箇所</h2><table><tr><th>箇所</th><th>状態</th><th>担当者</th><th>理由</th><th>現在の根拠</th></tr>{checks}</table>
 <p>状態はCLIのcapture-checkで記録してreportを再生成します。CAPTURED＝撮影済み、NEEDS_CAPTURE＝追加撮影が必要、NOT_TESTED＝未確認。</p>
 <h2>採用画像とマスク</h2><p>取り込みマスク: 白＝保持、黒＝除外。反転がないか元画像と比較してください。寸法・デコード・除外率の検査だけでは内容の正しさを保証しません。</p>{''.join(cards)}
 <details><summary>登録カメラの姿勢（未校正・world-to-camera）</summary><table><tr><th>画像</th><th>tvec</th><th>qvec wxyz</th></tr>{pose_rows}</table></details>
@@ -140,5 +145,5 @@ def report(job):
         (folder / 'index.html').write_text(document, encoding='utf-8')
         c.write(folder / 'report.json', {'internalOnly': True, 'createdAt': time.time(), 'configSha256': state['configSha256'],
                                        'sourceIndex': index, 'captureQA': qa, 'stageArtifacts': {k: v.get('artifacts') for k,v in state['stages'].items()},
-                                       'viewQA': 'NOT_TESTED', 'deliveryApproval': 'NOT_TESTED'})
+                                       'fieldEvidence': field_evidence, 'viewQA': 'NOT_TESTED', 'deliveryApproval': 'NOT_TESTED'})
         return {'report': str(folder / 'index.html'), 'internalOnly': True}
