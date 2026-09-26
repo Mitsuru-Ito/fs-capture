@@ -62,6 +62,15 @@ def main(argv=None):
     pi = sub.add_parser("preview-import", help="ブラウザから保存した視点・判定・証拠を検査して取り込む")
     pi.add_argument("preview")
     pi.add_argument("record")
+    derive = sub.add_parser("derive", help="承認済み上流を独立コピーし、学習反復数だけを変更")
+    derive.add_argument("parent")
+    derive.add_argument("job")
+    derive.add_argument("--iterations", type=int, required=True)
+    compare = sub.add_parser("preview-compare", help="同一SfM・表示条件の2プレビューをA/B比較")
+    compare.add_argument("first")
+    compare.add_argument("second")
+    compare.add_argument("output")
+    compare.add_argument("--viewpoints-from", help="候補Aと同じモデル・カメラの過去QAから視点だけを再利用")
     for action in ("plan", "run"):
         p = sub.add_parser(action, help="実行コマンドを表示" if action == "plan" else "1段階を実行")
         p.add_argument("job")
@@ -91,6 +100,13 @@ def main(argv=None):
                 else:
                     serve(folder, args.port)
                     return 0
+        elif args.action == "preview-compare":
+            from .preview import compare
+            result = {"preview": str(compare(args.first, args.second, args.output, args.viewpoints_from)),
+                      "visualQA": "NOT_TESTED"}
+        elif args.action == "derive":
+            from .derive import derive
+            result = derive(args.parent, args.job, args.iterations)
         elif args.action == "init":
             result = create(args.source, args.job, args.fps, args.iterations, args.spirula, args.ffprobe,
                             args.mask_model, args.decoder, args.ffmpeg)

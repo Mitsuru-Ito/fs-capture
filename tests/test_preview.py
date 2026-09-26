@@ -239,3 +239,54 @@ class PreviewTests(unittest.TestCase):
         folder=self.prepare();source=self.root/'record.json';c.write(source,self.record(folder));result=p.import_review(folder,source)
         saved=c.read(Path(result['review']));(folder/saved['evidence']).write_bytes(b'changed')
         self.assertTrue(self.request(folder,'/qa.json').send_error.called)
+
+
+class ComparisonTests(unittest.TestCase):
+    setUp=PreviewTests.setUp
+    tearDown=PreviewTests.tearDown
+    prepare=PreviewTests.prepare
+    record=PreviewTests.record
+
+    def pair(self):
+        a=self.prepare()
+        ply=self.outputs['train']/'training/step-000000001.ckpt/splat.ply'
+        raw=bytearray(ply.read_bytes());struct.pack_into('<f',raw,raw.index(b'end_header\n')+len(b'end_header\n'),.2);ply.write_bytes(raw)
+        self.state['stages']['train']['artifacts']=c.fingerprint(self.outputs['train']);c.write(self.job/'state.json',self.state)
+        return a,self.prepare()
+
+    def test_same_sfm_pair_binds_each_qa_to_model_and_preserves_parents(self):
+        a,b=self.pair();before=[c.fingerprint(pth) for pth in (a,b)]
+        folder=p.compare(a,b,self.root/'comparison')
+        self.assertEqual([c.fingerprint(pth) for pth in (a,b)],before)
+        scene=c.read(folder/'scene.json');candidates=scene['comparison']['candidates']
+        self.assertNotEqual(candidates[0]['modelSha256'],candidates[1]['modelSha256'])
+        record=self.record(folder);source=self.root/'review.json'
+        record.update(schemaVersion=2,candidateId='B',modelSha256=candidates[1]['modelSha256'],sourceBundleId=candidates[1]['sourceBundleId'])
+        c.write(source,record);saved=p.import_review(folder,source)
+        self.assertEqual(c.read(Path(saved['review']))['candidateId'],'B')
+        for field,value in [('candidateId','A'),('modelSha256','wrong'),('sourceBundleId','wrong'),('schemaVersion',1)]:
+            bad=copy.deepcopy(record);bad[field]=value;c.write(source,bad)
+            with self.assertRaises(c.CaptureError):p.import_review(folder,source)
+
+    def test_different_sfm_even_with_identity_transform_is_rejected(self):
+        a=self.prepare();points=self.outputs['sfm']/'sparse/0/points3D.bin'
+        raw=bytearray(points.read_bytes());struct.pack_into('<d',raw,16,.3);points.write_bytes(raw)
+        snapshot=c.fingerprint(self.outputs['sfm']);self.state['stages']['sfm']['artifacts']=snapshot;self.state['reviews']['sfm']['artifacts']=snapshot;c.write(self.job/'state.json',self.state)
+        b=self.prepare()
+        self.assertEqual(c.read(a/'cameras.json'),c.read(b/'cameras.json'))
+        with self.assertRaisesRegex(c.CaptureError,'coordinates'):p.compare(a,b,self.root/'comparison')
+
+    def test_different_projection_and_missing_identity_are_rejected(self):
+        a=self.prepare();b=p.prepare(self.job,self.runtime,fov=75,size=128)
+        with self.assertRaisesRegex(c.CaptureError,'cameraSha256'):p.compare(a,b,self.root/'projection')
+        scene=c.read(a/'scene.json');scene.pop('coordinates');c.write(a/'scene.json',scene)
+        bundle=c.read(a/'bundle.json');bundle['files']['scene.json']=c.digest(a/'scene.json');bundle['id']=p.object_hash(bundle['files']);c.write(a/'bundle.json',bundle)
+        with self.assertRaisesRegex(c.CaptureError,'SfM identity'):p.compare(a,b,self.root/'unknown')
+
+    def test_baseline_views_reused_without_verdict_or_evidence_inheritance(self):
+        a,b=self.pair();source=self.root/'review.json';record=self.record(a);record['status']='FAIL';c.write(source,record);p.import_review(a,source)
+        folder=p.compare(a,b,self.root/'comparison',viewpoints_from=a)
+        presets=c.read(folder/'viewpoints.json')['items'];self.assertEqual(len(presets),1)
+        self.assertEqual(presets[0]['status'],'NOT_TESTED');self.assertEqual(presets[0]['previousStatus'],'FAIL')
+        self.assertFalse((folder/'reviews').exists())
+        with self.assertRaises(c.CaptureError):p.compare(a,b,self.root/'wrong-baseline',viewpoints_from=b)

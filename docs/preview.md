@@ -66,4 +66,30 @@ python3 -m fs_capture capture-check work/room-02 入口 \
   --reference extract:images/capture_00/cam0/00000.jpg
 ```
 
-旧履歴に元々存在しなかった根拠ハッシュは後付けしない。比較対象を切り替えるA/B、派生ジョブ・上流再利用・処理量予算はPR3B、納品候補・用途別承認はPR4の独立変更として残る。
+旧履歴に元々存在しなかった根拠ハッシュは後付けしない。マスク変更の派生・処理量予算は後続、納品候補・用途別承認はPR4の独立変更として残る。
+
+## 学習だけをやり直す（PR3B）
+
+```sh
+python3 -m fs_capture derive work/room-02 work/room-02-20k --iterations 20000
+python3 -m fs_capture run work/room-02-20k train
+```
+
+初版の変更項目は反復数だけ。同じ値、入力・成果物・実行ファイルの改変、成功時ハッシュがない旧試行、未承認の上流を拒否する。抽出・適用済みマスク・SfMの形式とハッシュを再検査し、独立コピーする。親の画像・モデル・設定・QAは変更せず、ハードリンクも使わない。
+
+再利用した段階の記録は`execution=reused_not_executed`、親ジョブ・試行・設定/状態ハッシュ・依存キーを持つ。依存キーは入力、抽出とマスク条件、実行ファイル、上流成果物を含み、反復数だけを除く。上流の承認は元の根拠を付けて引き継ぐ。train、画質QA、撮影確認、プレビューは引き継がない。コピー失敗・中断状態のジョブは実行を拒否する。学習は新規実行であり、チェックポイントからの再開ではない。
+
+## 同一視点で候補A/Bを切り替える
+
+```sh
+python3 -m fs_capture preview work/room-02 --viewer-assets /path/to/spirula-source --prepare-only
+python3 -m fs_capture preview work/room-02-20k --viewer-assets /path/to/spirula-source --prepare-only
+python3 -m fs_capture preview-compare PREVIEW_A PREVIEW_B work/compare-01
+python3 -m fs_capture preview-serve work/compare-01 --port 8768
+```
+
+`preview-compare`はSfM・抽出・マスクの成果物ハッシュ、カメラ/投影/変換、ランタイム/描画条件の一致を要求する。恒等変換だけでは同じ座標系と扱わない。古いプレビューにSfM識別がない場合は標準`preview`で新規作成する。過去のプレビューは書き換えない。
+
+候補を切り替えてもカメラ位置・向き・投影は保持する。メモリ節約のため候補は一つずつ再読み込みする。読み込み中と失敗時は保存を止め、前の画像を次の候補として記録しない。候補ごとに新しく判定する。比較QAはschema 2で候補ID・モデルhash・元bundle IDにも結び付け、別候補への取り違えをCLI取り込みで拒否する。単一プレビューの既存schema 1は維持する。
+
+既存8視点などを再利用する場合は`preview-compare ... --viewpoints-from 過去のPREVIEW_A`を追加する。Aと同じモデル・カメラを持つ過去QAから視点だけを取り出し、「基準の検証視点」に表示する。過去のFAIL/PASSは履歴の説明として表示するが、新候補へ判定・証拠をコピーしない。別SfMの位置合わせ、画素単位の改善率、未学習視点の品質保証は実装していない。

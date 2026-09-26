@@ -468,6 +468,8 @@ def run(job, stage):
     job = Path(job).resolve()
     with locked(job):
         state = read(job / "state.json")
+        if state.get('status') in ('deriving', 'derivation_failed'):
+            raise CaptureError('派生コピーが未完了です。別の新規ジョブへderiveしてください。')
         if stage not in STAGES:
             raise CaptureError(f"不明な段階: {stage}")
         if state["stages"].get(stage, {}).get("status") == "succeeded":

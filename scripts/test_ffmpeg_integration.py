@@ -11,6 +11,7 @@ names = [
     'test_pipeline.PipelineTests.test_real_ffmpeg_dual_track_extraction',
     'test_diagnostics.DecodeIntegrationTests.test_actual_two_track_first_frame_decode',
     'test_collection.CollectionTests',
+    'test_derive.DeriveCollectionTests',
 ]
 suite = unittest.defaultTestLoader.loadTestsFromNames(names)
 expected = suite.countTestCases()

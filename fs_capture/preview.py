@@ -15,6 +15,7 @@ import uuid
 
 from . import core as c
 from .report import checked_output
+from .derive import object_hash
 
 ASSETS = Path(__file__).with_name('preview_assets')
 IDENTITY = [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
@@ -149,7 +150,12 @@ def prepare(job, runtime, fov=90, size=768):
                  'renderer': {'commit': pin['commit'], 'runtimeFiles': pin['files'], 'primitive': '3dgs',
                               'sh': 'full degree; no silent fallback', 'shDegree': sh_degree, 'packing': 'float16 attributes / snorm8 SH',
                               'background': [0, 0, 0], 'exposure': 1, 'transfer': 0, 'gamut': 'Rec.709'},
-                 'training': {'primitive': primitive, 'configSha256': c.digest(train/'config.json')},
+                 'training': {'primitive': primitive, 'iterations': config['settings']['iterations'],
+                              'configSha256': c.digest(train/'config.json')},
+                 'coordinates': {'contract': 'identical-sfm-v1',
+                                 'sfmArtifactsSha256': object_hash(state['stages']['sfm']['artifacts']),
+                                 'extractArtifactsSha256': object_hash(state['stages']['extract']['artifacts']),
+                                 'maskArtifactsSha256': object_hash(state['stages']['mask']['artifacts']) if masked else None},
                  'masking': 'APPLIED' if masked else 'NOT_APPLIED',
                  'process': 'PASS', 'visual': 'NOT_TESTED', 'navigation': 'NOT_TESTED',
                  'privacy': 'NOT_TESTED', 'delivery': 'NOT_TESTED'}
@@ -175,8 +181,13 @@ def verify(folder):
 
 
 def validate_record(record, bundle, sidecar, scene):
-    if record.get('schemaVersion') != 1 or record.get('bundleId') != bundle['id']:
+    comparison = scene.get('comparison')
+    if record.get('schemaVersion') != (2 if comparison else 1) or record.get('bundleId') != bundle['id']:
         raise c.CaptureError('QA belongs to another model / renderer / projection')
+    if comparison:
+        candidate = next((x for x in comparison['candidates'] if x['id'] == record.get('candidateId')), None)
+        if not candidate or any(record.get(k) != candidate[k] for k in ('modelSha256', 'sourceBundleId')):
+            raise c.CaptureError('QA comparison candidate identity differs')
     if record.get('shDegree') != scene['renderer']['shDegree']:
         raise c.CaptureError('QA renderer SH degree differs')
     for key in ('reviewer', 'purpose', 'reason', 'label', 'device', 'at'):
@@ -196,6 +207,55 @@ def validate_record(record, bundle, sidecar, scene):
             raise c.CaptureError('Nonunit viewpoint axis')
     if abs(sum(x*y for x, y in zip(view['forward'], view['up']))) > 1e-5:
         raise c.CaptureError('Nonorthogonal viewpoint axes')
+
+
+def compare(first, second, output, viewpoints_from=None):
+    """Package two verified previews sharing exact reconstruction and display conditions."""
+    first, second, output = [Path(p).resolve() for p in (first, second, output)]
+    if any(output.is_relative_to(p) or p.is_relative_to(output) for p in (first, second)):
+        raise c.CaptureError('Comparison output must be independent of input previews')
+    bundles = [verify(p) for p in (first, second)]
+    scenes = [c.read(p/'scene.json') for p in (first, second)]
+    a, b = scenes
+    if a.get('comparison') or b.get('comparison'):
+        raise c.CaptureError('Select two single-model previews')
+    if not a.get('coordinates') or a['coordinates'].get('contract') != 'identical-sfm-v1':
+        raise c.CaptureError('Recreate previews with verified SfM identity')
+    for key in ('coordinates', 'cameraSha256', 'renderer', 'masking'):
+        if a.get(key) != b.get(key):
+            raise c.CaptureError(f'Not the same reconstruction / projection / renderer: {key}')
+    for name in ('app.js', 'index.html', 'projection.mjs', 'style.css'):
+        if any(x['files'].get(name) != c.digest(ASSETS/name) for x in bundles):
+            raise c.CaptureError('Recreate previews with the current comparison UI')
+    presets=[]
+    if viewpoints_from:
+        prior=Path(viewpoints_from).resolve();old=verify(prior);old_scene=c.read(prior/'scene.json')
+        if old_scene['modelSha256']!=a['modelSha256'] or old_scene['cameraSha256']!=a['cameraSha256']:
+            raise c.CaptureError('Baseline viewpoint records need the same A model and cameras')
+        for path in sorted((prior/'reviews').glob('*.json')):
+            record=c.read(path);validate_record(record,old,c.read(prior/'cameras.json'),old_scene)
+            if c.digest(safe_file(prior,record['evidence']))!=record['evidenceSha256']:
+                raise c.CaptureError('Baseline QA evidence changed')
+            presets.append({'label':record['label'],'view':record['view'],'sourceReviewId':record['id'],
+                            'sourceBundleId':old['id'],'previousStatus':record['status'],
+                            'status':'NOT_TESTED'})
+    output.mkdir(parents=True,exist_ok=False)
+    for name in bundles[0]['files']:
+        target=output/name;target.parent.mkdir(parents=True,exist_ok=True)
+        shutil.copyfile(safe_file(first,name),target)
+        if c.digest(target)!=bundles[0]['files'][name]:
+            raise c.CaptureError('Preview changed while copying')
+    shutil.copyfile(safe_file(second,'model.ply'),output/'candidate-b.ply')
+    if c.digest(output/'candidate-b.ply')!=b['modelSha256']:
+        raise c.CaptureError('Candidate model changed while copying')
+    a['comparison']={'contract':'identical-sfm-and-display-v1','candidates':[
+        {'id':ident,'url':url,'modelSha256':s['modelSha256'],'sourceBundleId':bundle['id'],
+         'training':s['training'],'configSha256':s['configSha256'],'visual':'NOT_TESTED'}
+        for ident,url,s,bundle in zip(('A','B'),('model.ply','candidate-b.ply'),scenes,bundles)]}
+    c.write(output/'scene.json',a);c.write(output/'viewpoints.json',{'items':presets})
+    files=c.fingerprint(output);bundle={'schemaVersion':1,'files':files,'id':object_hash(files)}
+    c.write(output/'bundle.json',bundle);verify(output)
+    return output
 
 
 def check_png(raw, projection):

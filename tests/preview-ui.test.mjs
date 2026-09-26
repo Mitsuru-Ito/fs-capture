@@ -4,19 +4,20 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import vm from 'node:vm';
 
-async function ui({masked=true,saved=[]}={}) {
+async function ui({masked=true,saved=[],comparison=false,failCandidate=false}={}) {
   const elements=new Map();
   const element=id=>{if(!elements.has(id))elements.set(id,{value:({result:'NOT_TESTED',step:'0.1',saved:''})[id]??'',checked:false,disabled:false,hidden:true,href:'',textContent:'',width:128,height:128,
     append(){},removeAttribute(name){this[name]='';},getContext(){return {clearRect(){},drawImage(){},putImageData(){},getImageData(){return {width:128,height:128,data:new Uint8ClampedArray(128*128*4)};}}},toDataURL(){return 'data:image/png;base64,fixture';}});return elements.get(id);};
   const views=[1,2].map(id=>({id,position:[id,0,0],forward:[0,0,1],up:[0,-1,0],intrinsics:{},source:{cameraId:'cam0',frameIndex:id},imageUrl:`images/${id}.jpg`,maskUrl:masked?`masks/${id}.png`:null}));
   const projection={width:128,height:128,fovDegrees:90,model:'perspective'};
   const scene={renderer:{shDegree:0},modelSha256:'fixture',masking:masked?'APPLIED':'NOT_APPLIED'};
-  const urls={'scene.json':scene,'cameras.json':{views,projection},'bundle.json':{id:'fixture-bundle'},'qa.json':{items:saved}};
+  if(comparison)scene.comparison={candidates:[{id:'A',url:'model.ply',modelSha256:'model-a',sourceBundleId:'a',training:{iterations:1}},{id:'B',url:'candidate-b.ply',modelSha256:'model-b',sourceBundleId:'b',training:{iterations:2}}]};
+  const urls={'scene.json':scene,'cameras.json':{views,projection},'bundle.json':{id:'fixture-bundle'},'qa.json':{items:saved},'viewpoints.json':{items:[]}};
   class Camera {lookAt(p,t,u){this.pos=[...p];const f=t.map((v,i)=>v-p[i]),n=Math.hypot(...f);this.f=f.map(v=>v/n);this.u=[...u];}forward(){return [...this.f];}up(){return [...this.u];}right(){return [1,0,0];}}
   class Image {set src(url){if(!url)throw Error('Missing image URL');}async decode(){}naturalWidth=128;naturalHeight=128;}
   const context=vm.createContext({console,document:{getElementById:element,createElement:()=>element(`created-${elements.size}`)},fetch:async url=>({ok:true,json:async()=>urls[url]}),navigator:{userAgent:'DOM TEST ONLY'},
     Image,ImageData:class{},Blob,URL:{createObjectURL:()=> 'blob:fixture',revokeObjectURL(){}},Uint8ClampedArray,
-    Renderer:class {setSplat(){}updateSplatOrder(){}render(){}},Camera,initWasm:async()=>{},loadModelFromUrl:async()=>({kind:'splat',data:{shDegree:0,count:1}}),sortSplats(){},freeSplatSh(){},reproject:()=>new Uint8ClampedArray(128*128*4),samePose:()=>true});
+    Renderer:class {setSplat(){}updateSplatOrder(){}render(){}},Camera,initWasm:async()=>{},loadModelFromUrl:async url=>{if(failCandidate&&url==='candidate-b.ply')throw Error('fixture load failure');return {kind:'splat',data:{shDegree:0,count:1}};},sortSplats(){},freeSplatSh(){},freeSplat(){},reproject:()=>new Uint8ClampedArray(128*128*4),samePose:()=>true});
   const code=readFileSync(new URL('../fs_capture/preview_assets/app.js',import.meta.url),'utf8').replace(/^import .*;\n/gm,'');
   vm.runInContext(code,context);
   for(let i=0;i<20&&!element('save').onclick;i++)await new Promise(resolve=>setImmediate(resolve));
@@ -44,3 +45,16 @@ test('restoring a historical judgement is not a fresh assessment',async()=>{
   await t.judge('FAIL');await t.click('save');assert.equal(JSON.parse(t.element('export-json').value).restoredFrom,'past');
 });
 test('a verdict requires explicit confirmation even with complete text',async()=>{const t=await ui();await t.judge();t.element('confirmed').checked=false;await t.element('confirmed').onchange?.();await t.click('save');assert.equal(t.element('export-json').value,'');});
+test('A/B keeps the same pose and requires independent assessment',async()=>{
+  const t=await ui({comparison:true});await t.click('right');await t.click('look-left');await t.judge('FAIL');await t.click('save');
+  const a=JSON.parse(t.element('export-json').value);assert.equal(a.candidateId,'A');
+  t.element('candidate').value='B';await t.element('candidate').onchange();
+  assert.equal(t.element('result').value,'NOT_TESTED');await t.click('save');assert.equal(t.element('export-json').value,'');
+  await t.judge('FAIL');await t.click('save');const b=JSON.parse(t.element('export-json').value);
+  assert.deepEqual(b.view,a.view);assert.equal(b.schemaVersion,2);assert.equal(b.candidateId,'B');assert.equal(b.modelSha256,'model-b');assert.equal(b.sourceBundleId,'b');
+});
+test('candidate loading failure cannot save the previous image as the next model',async()=>{
+  const t=await ui({comparison:true,failCandidate:true});await t.judge();await t.click('save');
+  t.element('candidate').value='B';await t.element('candidate').onchange();
+  assert.equal(t.element('model').hidden,true);await t.judge();await t.click('save');assert.equal(t.element('export-json').value,'');
+});
